@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alternate Part Finder</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2230; --muted: #5f6b7d; --line: #dde2ea; --soft: #eef1f5;
+  --accent: #1f6feb; --accent-ink: #ffffff; --good: #1a7f37; --warn: #9a6700; --bad: #c62828; --chip: #e8eefb;
+  --lock: #e6f4ea; --range: #fff4e0; --any: #e8eefb; --none: #fdecec;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #11151c; --panel: #181e27; --ink: #e4e8ef; --muted: #98a3b4; --line: #2b3442; --soft: #202834;
+    --accent: #4c8dff; --accent-ink: #0b1220; --good: #4cc26b; --warn: #e3b341; --bad: #ff7b72; --chip: #1f2b40;
+    --lock: #17301f; --range: #33290f; --any: #1b2742; --none: #3a1d1d; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { position: sticky; top: 0; z-index: 5; display: flex; gap: 12px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { font-size: 15px; margin: 0 8px 0 0; white-space: nowrap; }
+#q { flex: 1 1 320px; min-width: 200px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font-size: 14px; }
+button, select, input[type=number], input[type=text] { font: inherit; color: var(--ink); }
+button { padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+button.link { border: 0; background: none; color: var(--accent); padding: 0; cursor: pointer; }
+#status { color: var(--muted); font-size: 12px; white-space: nowrap; }
+main { display: grid; grid-template-columns: minmax(360px, 38%) 1fr; gap: 14px; padding: 14px 16px; align-items: start; }
+@media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 14px; }
+.panel h2 { font-size: 13px; margin: 0 0 8px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.spacer { flex: 1; }
+.chip { display: inline-flex; gap: 4px; align-items: center; background: var(--chip); border-radius: 12px; padding: 2px 8px; margin: 2px 4px 2px 0; font-size: 12px; white-space: nowrap; }
+.chip button { border: 0; background: none; padding: 0 0 0 2px; cursor: pointer; color: var(--muted); }
+.badge { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 9px; border: 1px solid var(--line); color: var(--muted); margin-left: 4px; white-space: nowrap; }
+.badge.warn { color: var(--warn); border-color: var(--warn); }
+.badge.bad { color: var(--bad); border-color: var(--bad); }
+.badge.good { color: var(--good); border-color: var(--good); }
+.seed-title { font-size: 15px; font-weight: 600; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; font-size: 12px; margin-top: 6px; }
+.kv div:nth-child(odd) { color: var(--muted); }
+#criteria .tools { margin-bottom: 8px; }
+.crit { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; }
+.crit.m-lock { background: var(--lock); } .crit.m-range { background: var(--range); } .crit.m-any, .crit.m-all { background: var(--any); } .crit.m-none, .crit.m-absent { background: var(--none); } .crit.m-exists { background: var(--any); }
+.crit .head { display: flex; gap: 6px; align-items: center; }
+.crit .name { font-weight: 600; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.crit .seedval { font-size: 12px; color: var(--muted); margin: 2px 0 0 0; overflow-wrap: anywhere; }
+.crit .ctl { margin-top: 6px; }
+.crit select.mode { padding: 2px 4px; border-radius: 4px; border: 1px solid var(--line); background: var(--panel); }
+.crit .vals { max-height: 180px; overflow: auto; border-top: 1px dashed var(--line); padding-top: 4px; margin-top: 4px; }
+.crit .vals label { display: flex; gap: 6px; align-items: baseline; padding: 1px 0; font-size: 12px; }
+.crit .vals label .n { color: var(--muted); margin-left: auto; padding-left: 8px; }
+.crit .vals label.seedv span.t { font-weight: 600; }
+.crit input[type=number] { width: 7.5em; padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+.crit .blocker { font-size: 12px; color: var(--warn); margin-top: 4px; }
+.hist { width: 100%; height: 46px; display: block; margin-top: 4px; }
+.hist rect.bar { fill: var(--accent); opacity: .55; }
+.hist rect.band { fill: var(--warn); opacity: .18; }
+.hist line.seed { stroke: var(--bad); stroke-width: 2; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 10px; flex-wrap: wrap; }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 6px 12px; color: var(--muted); }
+.tabs button.on { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+tr:hover td { background: var(--soft); }
+.score { display: inline-block; width: 46px; height: 6px; background: var(--soft); border-radius: 3px; vertical-align: middle; margin-right: 4px; overflow: hidden; }
+.score i { display: block; height: 100%; background: var(--good); }
+.diff { display: inline-block; background: var(--none); border-radius: 4px; padding: 0 4px; margin: 1px 2px 1px 0; }
+.rel { display: inline-block; background: var(--lock); border-radius: 4px; padding: 0 4px; margin: 1px 2px 1px 0; }
+.err { color: var(--bad); white-space: pre-wrap; }
+.note { font-size: 12px; color: var(--muted); background: var(--soft); border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
+dialog { width: min(1100px, 96vw); max-height: 90vh; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); padding: 0; }
+dialog::backdrop { background: rgba(0,0,0,.35); }
+dialog .dh { position: sticky; top: 0; background: var(--panel); padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; }
+dialog .db { padding: 12px 14px; }
+.same td { color: var(--muted); }
+.notsame td.v { background: var(--range); }
+.pick { cursor: pointer; }
+.pick:hover { text-decoration: underline; }
+.loading { opacity: .55; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Alternate Part Finder</h1>
+  <input id="q" type="text" placeholder="NIIN, NSN, part number, CAGE:part number, or item name" autocomplete="off">
+  <button class="primary" id="go">Find</button>
+  <span id="status"></span>
+</header>
+<main>
+  <div id="left">
+    <div class="panel" id="seedPanel"><h2>Start</h2>
+      <div class="muted">Look up an item to use as the starting point, or search an item name to browse a whole group.
+      Then lock the characteristics that must match and widen the ones that may vary.</div>
+    </div>
+    <div class="panel" id="poolPanel" hidden><h2>Searching within</h2><div id="poolChips"></div>
+      <div class="row small" style="margin-top:6px"><input id="poolQ" type="text" placeholder="add another item name..." style="flex:1;padding:4px 6px;border:1px solid var(--line);border-radius:4px;background:var(--bg)"><button id="poolAdd">Add</button></div>
+      <div id="poolHits" class="small"></div>
+    </div>
+    <div class="panel" id="criteria" hidden><h2>Characteristics</h2>
+      <div class="row tools small">
+        <button id="lockAll" title="Lock every characteristic of the starting item">Lock all</button>
+        <button id="clearAll">Clear</button>
+        <label><input type="checkbox" id="showAll"> show characteristics the starting item lacks</label>
+        <span class="spacer"></span>
+        <input id="critFilter" type="text" placeholder="filter" style="width:9em;padding:3px 6px;border:1px solid var(--line);border-radius:4px;background:var(--bg)">
+      </div>
+      <div id="critList"></div>
+    </div>
+  </div>
+  <div id="right">
+    <div class="panel">
+      <div class="tabs" id="tabs">
+        <button data-tab="matches" class="on">Matches</button>
+        <button data-tab="relations">FLIS relationships</button>
+        <button data-tab="quality">Data quality</button>
+        <button data-tab="compare">Compare</button>
+        <button data-tab="help">How it works</button>
+      </div>
+      <div id="tab-matches"><div class="muted">No search yet.</div></div>
+      <div id="tab-relations" hidden><div class="muted">Pick a starting item to see what FLIS already links it to.</div></div>
+      <div id="tab-quality" hidden><div class="muted">Pick an item or item name first.</div></div>
+      <div id="tab-compare" hidden><div class="muted">Tick items in the match list to compare them with the starting item.</div></div>
+      <div id="tab-help" hidden></div>
+    </div>
+  </div>
+</main>
+<dialog id="detail"><div class="dh"><b id="dTitle"></b><span class="spacer"></span><button id="dSeed">Use as starting item</button><button id="dCmp">Add to compare</button><button id="dClose">Close</button></div><div class="db" id="dBody"></div></dialog>
+
+<script>
+'use strict';
+const $ = (s, el) => (el || document).querySelector(s);
+const $$ = (s, el) => Array.from((el || document).querySelectorAll(s));
+const esc = s => s == null ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = v => v == null ? '' : (Math.abs(v) >= 1e5 || (Math.abs(v) < 1e-3 && v !== 0) ? Number(v).toPrecision(4) : String(+Number(v).toPrecision(6)));
+const pct = v => v == null ? '' : Math.round(v * 100) + '%';
+// PUB LOG prices are zero-padded text ("000000035.97").
+const money = v => { if (v == null || v === '') return ''; const n = Number(v); return isNaN(n) ? String(v) : '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+const keyOf = (mrc, qual) => mrc + '|' + (qual || '');
+
+const st = {
+  seed: null, item: null, pools: [], poolInfo: {}, profile: null, crit: {}, results: null, facets: {},
+  compare: new Set(), showAll: false, filter: '', offset: 0, seq: 0, lastReq: null, counts: []
+};
+
+async function api(path, body) {
+  const opt = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {};
+  const r = await fetch(path, opt);
+  const t = await r.text();
+  let j; try { j = JSON.parse(t); } catch (e) { throw new Error('Bad response from ' + path + ': ' + t.slice(0, 200)); }
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+function setStatus(m, bad) { const s = $('#status'); s.textContent = m || ''; s.style.color = bad ? 'var(--bad)' : ''; }
+function showErr(where, e) { where.innerHTML = '<div class="err">' + esc(e.message || e) + '</div>'; }
+
+// ---------- start / resolve ----------
+async function find() {
+  const q = $('#q').value.trim(); if (!q) return;
+  setStatus('Looking up ' + q + ' ...');
+  try {
+    const r = await api('/api/resolve?q=' + encodeURIComponent(q));
+    setStatus('');
+    if (r.kind === 'niin' && r.items.length === 1 && !r.items[0].missing) return setSeed(r.items[0].niin);
+    renderResolve(r);
+  } catch (e) { setStatus(e.message, true); }
+}
+function renderResolve(r) {
+  const p = $('#seedPanel');
+  let h = '<h2>Results for "' + esc(r.query) + '"</h2>';
+  if (r.items && r.items.length) {
+    h += '<div class="small muted">' + (r.kind === 'part' ? (r.partMatch === 'prefix' ? 'Part numbers starting with that text' : 'Items carrying that part number') : 'Items') + ' - pick one as the starting item:</div><table><tr><th>NSN</th><th>Item name</th><th>Part number</th><th>Chars</th></tr>';
+    for (const it of r.items) {
+      const pn = (it.matched_parts || []).map(p => esc(p.part_number) + ' <span class="muted">(' + esc(p.cage) + ')</span>').join('<br>');
+      h += '<tr><td><button class="link" data-seed="' + it.niin + '">' + esc(it.nsn || it.niin) + '</button></td><td>' + esc(it.item_name || (it.missing ? 'not in PUB LOG' : '')) + '</td><td>' + pn + '</td><td>' + (it.replies || 0) + '</td></tr>';
+    }
+    h += '</table>';
+  }
+  const pools = r.pools ? r.pools.pools : [];
+  if (pools && pools.length) {
+    h += '<div class="small muted" style="margin-top:8px">Item names - browse a whole group without a starting item:</div><table><tr><th>Item name</th><th>INC</th><th>Items</th></tr>';
+    for (const pl of pools) h += '<tr><td><button class="link" data-pool="' + pl.pool + '">' + esc(pl.name) + '</button></td><td>' + esc(pl.inc) + '</td><td>' + pl.niins + '</td></tr>';
+    h += '</table>';
+    const col = r.pools.colloquial || [];
+    if (col.length) h += '<div class="small muted" style="margin-top:6px">Also known as: ' + col.map(c => '<button class="link" data-pool="' + c.pool + '">' + esc(c.colloquial_name) + ' &rarr; ' + esc(c.name) + '</button>').join(', ') + '</div>';
+  }
+  if ((!r.items || !r.items.length) && (!pools || !pools.length)) h += '<div class="muted">Nothing found. Part numbers are matched without punctuation (MS35206-245 = MS35206245); use CAGE:PN to pin the manufacturer.</div>';
+  p.innerHTML = h;
+}
+document.addEventListener('click', ev => {
+  const b = ev.target.closest('[data-seed],[data-pool],[data-detail]');
+  if (!b) return;
+  if (b.dataset.seed) { $('#detail').open && $('#detail').close(); setSeed(b.dataset.seed); }
+  else if (b.dataset.pool) setPoolOnly(+b.dataset.pool);
+  else if (b.dataset.detail) openDetail(b.dataset.detail);
+});
+
+async function setSeed(niin, preset) {
+  setStatus('Loading ' + niin + ' ...');
+  try {
+    const it = await api('/api/item?niin=' + niin);
+    st.seed = it.niin; st.item = it; st.crit = {}; st.compare = new Set(); st.offset = 0;
+    st.pools = it.pool != null ? [it.pool] : [];
+    if (preset && preset.pools && preset.pools.length) st.pools = [...new Set(st.pools.concat(preset.pools))];
+    if (preset && preset.crit) st.crit = preset.crit;
+    if (preset && preset.showAll) { st.showAll = true; $('#showAll').checked = true; }
+    renderSeed();
+    renderRelations();
+    if (!st.pools.length) {
+      $('#criteria').hidden = true; $('#poolPanel').hidden = true;
+      $('#tab-matches').innerHTML = '<div class="note">This item has no characteristics in PUB LOG, so there is nothing to match on. See the FLIS relationships tab for alternates FLIS already records.</div>';
+      selectTab('relations'); setStatus(''); return;
+    }
+    await loadProfile();
+    setStatus('');
+  } catch (e) { setStatus(e.message, true); }
+}
+async function setPoolOnly(pool, preset) {
+  st.seed = null; st.item = null; st.crit = (preset && preset.crit) || {}; st.pools = (preset && preset.pools) || [pool]; st.compare = new Set(); st.offset = 0;
+  $('#seedPanel').innerHTML = '<h2>Browsing an item name</h2><div class="muted small">No starting item: set criteria below to narrow the group. Results are sorted by NIIN.</div>';
+  $('#tab-relations').innerHTML = '<div class="muted">Pick a starting item to see what FLIS already links it to.</div>';
+  st.showAll = true; $('#showAll').checked = true;
+  await loadProfile();
+}
+
+function renderSeed() {
+  const it = st.item, id = it.identification || {}, d = it.decoded || {};
+  const m = (it.management || [])[0] || {};
+  const dec = o => o ? esc(o.code) + (o.text ? ' <span class="muted">' + esc(o.text) + '</span>' : '') : '';
+  let h = '<h2>Starting item</h2><div class="seed-title">' + esc(id.nsn) + ' &nbsp; ' + esc(id.item_name) + '</div>';
+  h += '<div class="kv">';
+  h += '<div>Item name code</div><div>' + esc(id.inc) + (it.poolInfo ? ' <span class="muted">(' + it.poolInfo.niins + ' items with characteristics)</span>' : '') + '</div>';
+  h += '<div>FSC</div><div>' + esc(id.fsc) + ' ' + esc(id.fsc_title) + '</div>';
+  if (m.aac) h += '<div>Acquisition advice</div><div>' + esc(m.aac) + ' <span class="muted">' + esc(m.aac_text) + '</span></div>';
+  if (m.unit_price) h += '<div>Unit price</div><div>' + esc(money(m.unit_price)) + ' / ' + esc(m.ui) + '</div>';
+  if (d.demil) h += '<div>DEMIL</div><div>' + dec(d.demil) + '</div>';
+  if (d.crit_cd) h += '<div>Criticality</div><div>' + dec(d.crit_cd) + '</div>';
+  if (d.hmic && d.hmic.code !== 'N') h += '<div>Hazmat</div><div>' + dec(d.hmic) + '</div>';
+  const parts = it.parts || [];
+  h += '<div>Part numbers</div><div>' + parts.slice(0, 6).map(p => esc(p.part_number) + ' <span class="muted">' + esc(p.cage_code) + (p.cage_status && p.cage_status !== 'A' ? ' ' + esc(p.cage_status_text || p.cage_status) : '') + '</span>').join('<br>') + (parts.length > 6 ? '<br><span class="muted">+' + (parts.length - 6) + ' more</span>' : '') + '</div>';
+  h += '</div><div class="row small" style="margin-top:6px"><button class="link" data-detail="' + it.niin + '">Full record</button></div>';
+  $('#seedPanel').innerHTML = h;
+}
+
+// ---------- pools ----------
+async function loadProfile() {
+  try {
+    const prof = await api('/api/pool?pool=' + st.pools.join(',') + (st.seed ? '&seed=' + st.seed : ''));
+    st.profile = prof;
+    for (const p of prof.pools) st.poolInfo[p.pool] = p;
+    renderPools();
+    renderCriteria();
+    loadQuality();
+    search();
+  } catch (e) { setStatus(e.message, true); }
+}
+function renderPools() {
+  $('#poolPanel').hidden = false;
+  $('#poolChips').innerHTML = st.pools.map(p => { const i = st.poolInfo[p] || {}; return '<span class="chip">' + esc(i.name || p) + ' <span class="muted">' + (i.niins || '') + '</span>' + (st.pools.length > 1 ? '<button data-rmpool="' + p + '" title="remove">&times;</button>' : '') + '</span>'; }).join('');
+}
+$('#poolChips').addEventListener('click', ev => { const b = ev.target.closest('[data-rmpool]'); if (!b) return; st.pools = st.pools.filter(p => p !== +b.dataset.rmpool); loadProfile(); });
+async function poolSearch() {
+  const q = $('#poolQ').value.trim(); if (!q) return;
+  try {
+    const r = await api('/api/pools?q=' + encodeURIComponent(q));
+    $('#poolHits').innerHTML = (r.pools || []).slice(0, 12).map(p => '<div><button class="link" data-addpool="' + p.pool + '">' + esc(p.name) + '</button> <span class="muted">' + p.niins + ' items, INC ' + esc(p.inc) + '</span></div>').join('') || '<div class="muted">No item names match.</div>';
+  } catch (e) { showErr($('#poolHits'), e); }
+}
+$('#poolAdd').onclick = poolSearch;
+$('#poolQ').addEventListener('keydown', e => { if (e.key === 'Enter') poolSearch(); });
+$('#poolHits').addEventListener('click', ev => { const b = ev.target.closest('[data-addpool]'); if (!b) return; const p = +b.dataset.addpool; if (!st.pools.includes(p)) st.pools.push(p); $('#poolHits').innerHTML = ''; $('#poolQ').value = ''; loadProfile(); });
+
+// ---------- criteria ----------
+function seedAtomsByKey() {
+  const m = {};
+  for (const a of (st.profile && st.profile.seedAtoms) || []) (m[keyOf(a.mrc, a.qual)] = m[keyOf(a.mrc, a.qual)] || []).push(a);
+  return m;
+}
+function seedReply(mrc) {
+  const c = ((st.item && st.item.characteristics) || []).find(x => x.mrc === mrc);
+  return c ? c.reply : null;
+}
+function visibleChars() {
+  const sk = seedAtomsByKey();
+  let list = (st.profile ? st.profile.chars : []).map(c => Object.assign({ key: keyOf(c.mrc, c.qual), seed: sk[keyOf(c.mrc, c.qual)] || null }, c));
+  if (st.seed && !st.showAll) list = list.filter(c => c.seed || st.crit[c.key]);
+  else if (!st.seed) list = list.filter(c => c.coverage >= 0.02 || st.crit[c.key]);
+  if (st.filter) { const f = st.filter.toUpperCase(); list = list.filter(c => (c.statement + ' ' + c.qual + ' ' + c.mrc).toUpperCase().includes(f)); }
+  list.sort((a, b) => (!!b.seed - !!a.seed) || (b.niins - a.niins));
+  return list.slice(0, 150);
+}
+function seedSummary(c) {
+  if (!c.seed) return '';
+  return c.seed.map(a => a.kind === 'TXT' ? a.txt : ((a.kind === 'MIN' ? 'min ' : a.kind === 'MAX' ? 'max ' : '') + (a.loDisplay != null ? (a.loDisplay === a.hiDisplay ? fmt(a.loDisplay) : fmt(a.loDisplay) + ' to ' + fmt(a.hiDisplay)) + ' ' + (a.unit || '').toLowerCase() : (a.lo === a.hi ? fmt(a.lo) : fmt(a.lo) + ' to ' + fmt(a.hi))))).join('; ');
+}
+function badges(c) {
+  let b = '<span class="badge" title="share of items in this group that have a value">' + pct(c.coverage) + '</span>';
+  if (c.mixedUnits) b += '<span class="badge warn" title="' + esc(c.units) + '">units mixed</span>';
+  if (c.mixedKinds) b += '<span class="badge warn" title="some replies are numbers, some are text">mixed</span>';
+  if (c.outliers > 0) b += '<span class="badge bad" title="values 10x or more from the median - possible unit or decimal errors; see Data quality">' + c.outliers + ' odd</span>';
+  return b;
+}
+function renderCriteria() {
+  $('#criteria').hidden = false;
+  const list = visibleChars();
+  const out = [];
+  for (const c of list) {
+    const cr = st.crit[c.key];
+    const mode = cr ? (cr.mode === 'exact' ? 'lock' : cr.mode) : 'ignore';
+    const numeric = c.numeric;
+    const opts = numeric
+      ? [['ignore', '-'], ['lock', 'Lock (same value)'], ['range', 'Range...'], ['exists', 'Has a value'], ['absent', 'Has no value']]
+      : [['ignore', '-'], ['lock', 'Lock (same value)'], ['any', 'Any of...'], ['all', 'All of...'], ['none', 'None of...'], ['exists', 'Has a value'], ['absent', 'Has no value']];
+    let h = '<div class="crit m-' + mode + '" data-key="' + esc(c.key) + '">';
+    h += '<div class="head"><select class="mode">' + opts.map(o => '<option value="' + o[0] + '"' + (o[0] === mode ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select>';
+    h += '<span class="name">' + esc(c.statement) + (c.qual ? ' <span class="muted">(' + esc(c.qual.toLowerCase()) + ')</span>' : '') + '</span>' + badges(c) + '</div>';
+    if (c.seed) h += '<div class="seedval">Start: ' + esc(seedSummary(c)) + '</div>';
+    if (cr && mode !== 'ignore') h += '<div class="ctl">' + controlHtml(c, cr) + '</div>';
+    const cc = cr && st.counts[cr._ix];
+    if (cc && cc.onlyBlocker > 0) h += '<div class="blocker">Loosening this alone would add ' + cc.onlyBlocker + ' item(s).</div>';
+    h += '</div>';
+    out.push(h);
+  }
+  const hidden = st.profile ? st.profile.chars.length - list.length : 0;
+  $('#critList').innerHTML = out.join('') + (hidden > 0 ? '<div class="small muted">' + hidden + ' more characteristic(s) in this group' + (st.seed && !st.showAll ? ' - tick "show characteristics the starting item lacks"' : '') + '.</div>' : '');
+}
+function controlHtml(c, cr) {
+  const f = st.facets[c.key];
+  let h = '';
+  if (cr.mode === 'range' || (cr.mode === 'lock' && c.numeric)) {
+    const u = (c.displayUnit || '').toLowerCase();
+    h += '<div class="row small">from <input type="number" step="any" class="lo" value="' + (cr.lo == null ? '' : fmt(cr.lo)) + '"> to <input type="number" step="any" class="hi" value="' + (cr.hi == null ? '' : fmt(cr.hi)) + '"> ' + esc(u);
+    h += ' <select class="test" title="how a candidate\'s value must relate to this range"><option value="within"' + (cr.test === 'within' ? ' selected' : '') + '>value within</option><option value="overlap"' + (cr.test === 'overlap' ? ' selected' : '') + '>overlaps</option><option value="covers"' + (cr.test === 'covers' ? ' selected' : '') + '>covers range</option></select></div>';
+    if (c.seed) h += '<div class="row small" style="margin-top:3px">around start: ' + [0, 1, 5, 10, 25, 50].map(p => '<button class="link" data-widen="' + p + '">' + (p ? '&plusmn;' + p + '%' : 'exact') + '</button>').join(' &middot; ') + '</div>';
+    if (f && f.hist) h += histSvg(f.hist, cr, c);
+  } else if (['any', 'all', 'none', 'exact'].includes(cr.mode)) {
+    const seedVals = new Set((c.seed || []).filter(a => a.kind === 'TXT').map(a => a.txt));
+    const vals = (f && f.values) ? f.values : (c.top_txt || []);
+    const sel = cr.values || new Set();
+    if (cr.mode === 'exact') h += '<div class="small muted">Must have exactly: ' + esc([...sel].join(' + ')) + '</div>';
+    else {
+      h += '<div class="vals">';
+      const shown = new Set();
+      for (const v of vals) { shown.add(v.txt); h += '<label class="' + (seedVals.has(v.txt) ? 'seedv' : '') + '"><input type="checkbox" data-val="' + esc(v.txt) + '"' + (sel.has(v.txt) ? ' checked' : '') + '><span class="t">' + esc(v.txt) + '</span><span class="n">' + v.n + '</span></label>'; }
+      for (const v of sel) if (!shown.has(v)) h += '<label><input type="checkbox" data-val="' + esc(v) + '" checked><span class="t">' + esc(v) + '</span><span class="n">0</span></label>';
+      h += '</div>';
+      if (f && f.distinct > (f.values || []).length) h += '<div class="small muted">showing ' + (f.values || []).length + ' of ' + f.distinct + ' values</div>';
+    }
+  }
+  if (!['absent', 'exists'].includes(cr.mode)) h += '<label class="small"><input type="checkbox" class="missing"' + (cr.missing === 'include' ? ' checked' : '') + '> also keep items with no value here' + (f ? ' <span class="muted">(' + f.missing + ')</span>' : '') + '</label>';
+  if (c.qual) h += ' <label class="small" title="match this characteristic whatever its location wording"><input type="checkbox" class="anyq"' + (cr.anyQual ? ' checked' : '') + '> any location</label>';
+  return h;
+}
+function histSvg(hs, cr, c) {
+  const W = 300, H = 46, n = hs.counts.length, max = Math.max(1, ...hs.counts);
+  const x = v => { if (v == null) return null; const e = hs.edges, a = e[0], b = e[e.length - 1]; if (hs.log) { if (v <= 0) return 0; return (Math.log10(v) - Math.log10(a)) / (Math.log10(b) - Math.log10(a) || 1) * W; } return (v - a) / ((b - a) || 1) * W; };
+  let s = '<svg class="hist" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none">';
+  const lo = cr.lo == null ? null : x(cr.lo), hi = cr.hi == null ? null : x(cr.hi);
+  if (lo != null || hi != null) { const a = Math.max(0, lo == null ? 0 : lo), b = Math.min(W, hi == null ? W : hi); if (b > a) s += '<rect class="band" x="' + a + '" y="0" width="' + Math.max(1, b - a) + '" height="' + H + '"/>'; }
+  hs.counts.forEach((k, i) => { const h = k / max * (H - 4); s += '<rect class="bar" x="' + (i * W / n + .5) + '" y="' + (H - h) + '" width="' + (W / n - 1) + '" height="' + h + '"><title>' + k + '</title></rect>'; });
+  for (const a of (c.seed || [])) if (a.kind !== 'TXT') { const v = a.loDisplay != null ? (a.loDisplay + a.hiDisplay) / 2 : (a.lo + a.hi) / 2; const xv = x(v); if (xv != null) s += '<line class="seed" x1="' + xv + '" x2="' + xv + '" y1="0" y2="' + H + '"><title>start</title></line>'; }
+  s += '</svg><div class="row small muted"><span>' + fmt(hs.min) + '</span><span class="spacer"></span><span>' + hs.n + ' values' + (hs.log ? ', log scale' : '') + '</span><span class="spacer"></span><span>' + fmt(hs.max) + '</span></div>';
+  return s;
+}
+function charByKey(key) { return (st.profile.chars || []).find(c => keyOf(c.mrc, c.qual) === key); }
+function initCrit(c, mode) {
+  const sk = seedAtomsByKey()[keyOf(c.mrc, c.qual)] || [];
+  const cr = { mode, values: new Set(), lo: null, hi: null, test: 'within', missing: 'exclude', anyQual: false };
+  const num = sk.filter(a => a.kind !== 'TXT');
+  if (num.length) {
+    const lo = Math.min(...num.map(a => a.loDisplay != null ? a.loDisplay : a.lo)), hi = Math.max(...num.map(a => a.hiDisplay != null ? a.hiDisplay : a.hi));
+    const pad = mode === 'range' ? Math.abs((lo + hi) / 2) * 0.1 : 0;
+    cr.lo = +(lo - pad).toPrecision(6); cr.hi = +(hi + pad).toPrecision(6);
+  }
+  for (const a of sk) if (a.kind === 'TXT') cr.values.add(a.txt);
+  if (mode === 'lock' && !c.numeric) cr.mode = 'exact';
+  return cr;
+}
+$('#critList').addEventListener('change', ev => {
+  const box = ev.target.closest('.crit'); if (!box) return;
+  const key = box.dataset.key, c = charByKey(key); if (!c) return;
+  if (ev.target.classList.contains('mode')) {
+    const m = ev.target.value;
+    if (m === 'ignore') delete st.crit[key];
+    else { const old = st.crit[key]; st.crit[key] = old && m !== 'lock' ? Object.assign(old, { mode: m }) : initCrit(c, m); if (m === 'lock') st.crit[key].mode = c.numeric ? 'lock' : 'exact'; }
+  } else {
+    const cr = st.crit[key]; if (!cr) return;
+    if (ev.target.classList.contains('lo')) cr.lo = ev.target.value === '' ? null : +ev.target.value;
+    else if (ev.target.classList.contains('hi')) cr.hi = ev.target.value === '' ? null : +ev.target.value;
+    else if (ev.target.classList.contains('test')) cr.test = ev.target.value;
+    else if (ev.target.classList.contains('missing')) cr.missing = ev.target.checked ? 'include' : 'exclude';
+    else if (ev.target.classList.contains('anyq')) cr.anyQual = ev.target.checked;
+    else if (ev.target.dataset.val != null) { if (ev.target.checked) cr.values.add(ev.target.dataset.val); else cr.values.delete(ev.target.dataset.val); }
+    if (cr.mode === 'lock' && (ev.target.classList.contains('lo') || ev.target.classList.contains('hi'))) cr.mode = 'range';
+  }
+  st.offset = 0; renderCriteria(); searchSoon();
+});
+$('#critList').addEventListener('click', ev => {
+  const b = ev.target.closest('[data-widen]'); if (!b) return;
+  const box = b.closest('.crit'), key = box.dataset.key, c = charByKey(key), cr = st.crit[key];
+  const sk = (seedAtomsByKey()[key] || []).filter(a => a.kind !== 'TXT'); if (!sk.length) return;
+  const lo = Math.min(...sk.map(a => a.loDisplay != null ? a.loDisplay : a.lo)), hi = Math.max(...sk.map(a => a.hiDisplay != null ? a.hiDisplay : a.hi));
+  const p = +b.dataset.widen / 100, mid = Math.abs((lo + hi) / 2);
+  cr.lo = +(lo - mid * p).toPrecision(6); cr.hi = +(hi + mid * p).toPrecision(6); cr.mode = p === 0 ? 'lock' : 'range';
+  st.offset = 0; renderCriteria(); searchSoon();
+});
+$('#lockAll').onclick = () => { for (const c of visibleChars()) if (c.seed) { st.crit[c.key] = initCrit(c, 'lock'); } st.offset = 0; renderCriteria(); search(); };
+$('#clearAll').onclick = () => { st.crit = {}; st.offset = 0; renderCriteria(); search(); };
+$('#showAll').onchange = e => { st.showAll = e.target.checked; renderCriteria(); search(); };
+$('#critFilter').oninput = e => { st.filter = e.target.value; renderCriteria(); };
+
+// ---------- search ----------
+let timer = null;
+function searchSoon() { clearTimeout(timer); timer = setTimeout(search, 250); }
+function buildRequest(limit, offset) {
+  const constraints = [];
+  let i = 0;
+  for (const [key, cr] of Object.entries(st.crit)) {
+    const c = charByKey(key); if (!c) continue;
+    const mode = cr.mode === 'lock' ? 'range' : cr.mode;
+    const o = { mrc: c.mrc, qual: c.qual, mode, test: cr.mode === 'lock' ? 'within' : cr.test, missing: cr.missing, anyQual: cr.anyQual };
+    if (mode === 'range') { o.lo = cr.lo; o.hi = cr.hi; o.unit = c.displayUnit; }
+    else o.values = [...(cr.values || [])];
+    cr._ix = i++;
+    constraints.push(o);
+  }
+  const facets = visibleChars().map(c => ({ mrc: c.mrc, qual: c.qual }));
+  return { pools: st.pools, seed: st.seed, constraints, facets, limit, offset, sort: st.seed ? 'score' : 'niin' };
+}
+// The page state lives in the URL hash, so a search can be bookmarked or sent to a colleague.
+function saveHash() {
+  const c = {};
+  for (const [k, cr] of Object.entries(st.crit)) c[k] = { m: cr.mode, v: [...(cr.values || [])], lo: cr.lo, hi: cr.hi, t: cr.test, x: cr.missing === 'include' ? 1 : 0, q: cr.anyQual ? 1 : 0 };
+  const h = (st.seed ? 'niin=' + st.seed : 'pools=' + st.pools.join(',')) + (st.seed && st.pools.length > 1 ? '&pools=' + st.pools.join(',') : '') + (Object.keys(c).length ? '&c=' + encodeURIComponent(JSON.stringify(c)) : '');
+  history.replaceState(null, '', '#' + h);
+}
+function critFromHash(c) {
+  const out = {};
+  for (const [k, v] of Object.entries(c || {})) out[k] = { mode: v.m, values: new Set(v.v || []), lo: v.lo, hi: v.hi, test: v.t || 'within', missing: v.x ? 'include' : 'exclude', anyQual: !!v.q };
+  return out;
+}
+async function search() {
+  if (!st.pools.length) return;
+  saveHash();
+  const my = ++st.seq;
+  const req = buildRequest(100, st.offset);
+  st.lastReq = req;
+  $('#tab-matches').classList.add('loading');
+  try {
+    const r = await api('/api/search', req);
+    if (my !== st.seq) return;
+    st.counts = r.constraintCounts || [];
+    st.facets = {};
+    for (const f of r.facets) st.facets[keyOf(f.mrc, f.qual)] = f;
+    if (st.offset === 0) st.results = r; else { st.results.rows = st.results.rows.concat(r.rows); st.results.total = r.total; }
+    renderCriteria();
+    renderMatches();
+  } catch (e) { if (my === st.seq) showErr($('#tab-matches'), e); }
+  finally { if (my === st.seq) $('#tab-matches').classList.remove('loading'); }
+}
+function relTag(t) { return '<span class="rel">' + esc({ standardization: 'FLIS standardization', cancelled: 'cancelled/replaced', same_part_number: 'same part no.', replacement: 'replacement', phrase: 'phrase' }[t] || t) + '</span>'; }
+function renderMatches() {
+  const r = st.results; if (!r) return;
+  const nCons = Object.keys(st.crit).length;
+  let h = '<div class="row"><b>' + r.total + '</b> of ' + r.poolNiins + ' items match ' + (nCons ? nCons + ' criteria' : '(no criteria yet)') + '<span class="muted small">&nbsp; ' + r.ms + ' ms</span><span class="spacer"></span>';
+  h += '<button id="exportCsv">Export CSV</button></div>';
+  if (st.seed && !nCons) h += '<div class="note">Ranked by similarity to the starting item across all its characteristics. Lock or bound characteristics on the left to narrow the list.</div>';
+  h += '<div class="tablewrap"><table><tr><th></th><th>Match</th><th>NSN</th><th>Item name</th><th>Differs from start</th><th>Buy</th><th>Price</th><th>Part numbers</th></tr>';
+  for (const x of r.rows) {
+    const s = Math.round(x.score * 100);
+    const diffs = (x.diffs || []).map(d => '<span class="diff" title="' + esc(d.statement) + (d.qual ? ' (' + esc(d.qual) + ')' : '') + '">' + esc(d.statement.toLowerCase()) + ': ' + esc(d.value) + '</span>').join('');
+    const parts = (x.parts || []).slice(0, 3).map(p => esc(p.part_number) + ' <span class="muted">' + esc(p.cage_code) + (p.cage_status && p.cage_status !== 'A' ? '*' : '') + '</span>').join('<br>');
+    const buy = x.procurable == null ? '' : x.procurable ? '<span class="badge good" title="AAC ' + esc(x.aac) + '">' + esc(x.aac) + '</span>' : '<span class="badge bad" title="AAC ' + esc(x.aac) + ' - not procurable">' + esc(x.aac) + '</span>';
+    h += '<tr><td><input type="checkbox" data-cmp="' + x.niin + '"' + (st.compare.has(x.niin) ? ' checked' : '') + ' title="compare"></td>';
+    h += '<td>' + (st.seed ? '<span class="score"><i style="width:' + s + '%"></i></span>' + s + '% <span class="muted">' + x.matched + '/' + x.compared + (x.unknown ? ' (' + x.unknown + ' n/a)' : '') + '</span>' : '') + '</td>';
+    h += '<td style="white-space:nowrap"><button class="link" data-detail="' + x.niin + '">' + esc(x.nsn || x.niin) + '</button></td><td style="min-width:9em">' + esc(x.item_name) + (x.relations ? '<br>' + x.relations.map(relTag).join('') : '') + '</td>';
+    h += '<td>' + diffs + '</td><td>' + buy + '</td><td style="white-space:nowrap">' + (x.unit_price ? esc(money(x.unit_price)) + '<span class="muted">/' + esc(x.ui) + '</span>' : '') + '</td><td>' + parts + (x.active_cages === 0 ? '<br><span class="badge warn">no active CAGE</span>' : '') + '</td></tr>';
+  }
+  h += '</table></div>';
+  if (r.rows.length < r.total) h += '<div class="row" style="margin-top:8px"><button id="more">Show more (' + (r.total - r.rows.length) + ' left)</button></div>';
+  $('#tab-matches').innerHTML = h;
+  const more = $('#more'); if (more) more.onclick = () => { st.offset = st.results.rows.length; search(); };
+  $('#exportCsv').onclick = exportCsv;
+  $$('#tab-matches [data-cmp]').forEach(cb => cb.onchange = () => { if (cb.checked) st.compare.add(cb.dataset.cmp); else st.compare.delete(cb.dataset.cmp); updateCompareTab(); });
+  $('[data-tab=matches]').textContent = 'Matches (' + r.total + ')';
+}
+async function exportCsv() {
+  try {
+    setStatus('Preparing CSV ...');
+    const req = buildRequest(2000, 0);
+    const r = await api('/api/search', req);
+    const head = ['nsn', 'niin', 'item_name', 'score', 'matched', 'compared', 'unknown', 'aac', 'unit_price', 'ui', 'active_cages', 'relations', 'differences', 'part_numbers'];
+    const q = v => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    const lines = [head.join(',')];
+    for (const x of r.rows) lines.push([x.nsn, x.niin, x.item_name, x.score, x.matched, x.compared, x.unknown, x.aac, x.unit_price, x.ui, x.active_cages, (x.relations || []).join(' '),
+      (x.diffs || []).map(d => d.statement + ': ' + d.value).join(' | '), (x.parts || []).map(p => p.part_number + ' (' + p.cage_code + ')').join(' | ')].map(q).join(','));
+    const crit = Object.entries(st.crit).map(([k, cr]) => '# ' + k + ' ' + cr.mode + (cr.lo != null ? ' ' + cr.lo + '..' + cr.hi : '') + (cr.values && cr.values.size ? ' [' + [...cr.values].join(' / ') + ']' : ''));
+    const blob = new Blob(['# Alternate Part Finder export ' + new Date().toISOString() + (st.seed ? ' start ' + st.seed : '') + '\n' + crit.join('\n') + (crit.length ? '\n' : '') + lines.join('\n')], { type: 'text/csv' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'alternates_' + (st.seed || 'pool') + '.csv'; a.click();
+    setStatus('Exported ' + r.rows.length + ' rows' + (r.total > r.rows.length ? ' (first 2000 of ' + r.total + ')' : ''));
+  } catch (e) { setStatus(e.message, true); }
+}
+
+// ---------- relationships ----------
+function renderRelations() {
+  const rel = (st.item && st.item.relations) || [];
+  const box = $('#tab-relations');
+  $('[data-tab=relations]').textContent = 'FLIS relationships (' + rel.length + ')';
+  if (!rel.length) { box.innerHTML = '<div class="muted">FLIS records no standardization, replacement, phrase or shared-part-number links for this item.</div>'; return; }
+  const groups = {};
+  for (const r of rel) (groups[r.type] = groups[r.type] || []).push(r);
+  const title = { standardization: 'Standardization decisions (V_FLIS_STANDARDIZATION)', cancelled: 'Cancelled / replacement NIINs (V_FLIS_CANCELLED_NIIN)', replacement: 'Replacement in management history', phrase: 'Phrases (V_FLIS_PHRASE)', same_part_number: 'Same reference number on other NIINs (V_FLIS_PART)' };
+  let h = '<div class="note">These links come from FLIS itself, independent of characteristics. "Same reference number" includes spec/standard numbers shared by many items, so check the reference category code.</div>';
+  for (const [t, list] of Object.entries(groups)) {
+    h += '<h3 style="font-size:13px;margin:10px 0 4px">' + esc(title[t] || t) + ' <span class="muted">' + list.length + '</span></h3><table><tr><th>NSN</th><th>Item name</th><th>Relationship</th><th>Code</th></tr>';
+    for (const r of list) h += '<tr><td>' + (r.niin ? '<button class="link" data-detail="' + r.niin + '">' + esc(r.nsn || r.niin) + '</button>' : '') + '</td><td>' + esc(r.item_name) + '</td><td>' + esc(r.text) + '</td><td>' + esc(r.code) + ' <span class="muted">' + esc(r.codeText) + '</span></td></tr>';
+    h += '</table>';
+  }
+  box.innerHTML = h;
+}
+
+// ---------- quality ----------
+async function loadQuality() {
+  const box = $('#tab-quality');
+  box.innerHTML = '<div class="muted">Loading ...</div>';
+  try {
+    const q = await api('/api/quality?pool=' + st.pools.join(','));
+    let h = q.notes.map(n => '<div class="note">' + esc(n) + '</div>').join('');
+    h += '<h3 style="font-size:13px;margin:10px 0 4px">Characteristics in this group that need a second look <span class="muted">' + q.findings.length + '</span></h3>';
+    if (!q.findings.length) h += '<div class="muted">No mixed units, mixed reply types or 10x outliers in this group.</div>';
+    for (const f of q.findings) {
+      h += '<div class="crit"><div class="head"><span class="name">' + esc(f.statement) + (f.qual ? ' <span class="muted">(' + esc(f.qual.toLowerCase()) + ')</span>' : '') + '</span><span class="badge">' + f.niins + ' items</span></div><ul class="small" style="margin:4px 0 0 18px;padding:0">' + f.issues.map(i => '<li>' + esc(i) + '</li>').join('') + '</ul>';
+      if (f.outlierItems && f.outlierItems.length) h += '<div class="small">Check: ' + f.outlierItems.map(o => '<button class="link" data-detail="' + o.niin + '">' + o.niin + '</button> ' + esc(o.value)).join(' &middot; ') + '</div>';
+      h += '</div>';
+    }
+    if (q.parseGaps.length) {
+      h += '<h3 style="font-size:13px;margin:10px 0 4px">Replies the parser kept as text (unit wording not recognised)</h3><table><tr><th>MRC</th><th>Requirement</th><th>Kept as text</th><th>Example</th></tr>';
+      for (const g of q.parseGaps) h += '<tr><td>' + esc(g.mrc) + '</td><td>' + esc(g.statement) + '</td><td>' + g.unparsed_numeric + ' / ' + g.replies + '</td><td>' + esc(g.example_unparsed) + '</td></tr>';
+      h += '</table>';
+    }
+    box.innerHTML = h;
+  } catch (e) { showErr(box, e); }
+}
+
+// ---------- compare ----------
+function updateCompareTab() { $('[data-tab=compare]').textContent = 'Compare (' + st.compare.size + ')'; if (!$('#tab-compare').hidden) renderCompare(); }
+async function renderCompare() {
+  const box = $('#tab-compare');
+  const niins = [st.seed, ...st.compare].filter(Boolean);
+  if (niins.length < 2) { box.innerHTML = '<div class="muted">Tick items in the match list to compare them with the starting item.</div>'; return; }
+  try {
+    const r = await api('/api/compare?niins=' + niins.join(','));
+    let h = '<label class="small"><input type="checkbox" id="onlyDiff" checked> only rows that differ</label><div class="tablewrap"><table id="cmpT"><tr><th>Requirement</th>' + r.items.map((it, i) => '<th>' + (i === 0 && st.seed ? 'Start<br>' : '<input type="checkbox" checked data-uncmp="' + it.niin + '" title="remove"> ') + '<button class="link" data-detail="' + it.niin + '">' + esc(it.nsn) + '</button><br><span class="muted">' + esc(it.item_name) + '</span></th>').join('') + '</tr>';
+    for (const row of r.rows) {
+      h += '<tr class="' + (row.same ? 'same' : 'notsame') + '"><td>' + esc(row.statement) + '</td>' + r.items.map(it => '<td class="v">' + esc(row.values[it.niin] || '') + '</td>').join('') + '</tr>';
+    }
+    h += '</table></div>';
+    box.innerHTML = h;
+    const apply = () => $$('#cmpT tr.same').forEach(tr => tr.hidden = $('#onlyDiff').checked);
+    $('#onlyDiff').onchange = apply; apply();
+    $$('#cmpT [data-uncmp]').forEach(cb => cb.onchange = () => { st.compare.delete(cb.dataset.uncmp); updateCompareTab(); renderCompare(); if (st.results) renderMatches(); });
+  } catch (e) { showErr(box, e); }
+}
+
+// ---------- detail dialog ----------
+async function openDetail(niin) {
+  const dlg = $('#detail');
+  $('#dTitle').textContent = niin; $('#dBody').innerHTML = '<div class="muted">Loading ...</div>';
+  if (!dlg.open) dlg.showModal();
+  $('#dSeed').onclick = () => { dlg.close(); setSeed(niin); };
+  $('#dCmp').onclick = () => { if (niin !== st.seed) st.compare.add(niin); updateCompareTab(); if (st.results) renderMatches(); };
+  try {
+    const it = await api('/api/item?niin=' + niin);
+    const id = it.identification || {}, d = it.decoded || {};
+    $('#dTitle').textContent = (id.nsn || niin) + '  ' + (id.item_name || '');
+    const dec = o => o ? esc(o.code) + (o.text ? ' - ' + esc(o.text) : '') : '';
+    let h = '<div class="kv"><div>INC</div><div>' + esc(id.inc) + '</div><div>FSC</div><div>' + esc(id.fsc) + ' ' + esc(id.fsc_title) + '</div>';
+    for (const [k, l] of [['demil', 'DEMIL'], ['crit_cd', 'Criticality'], ['hmic', 'Hazmat'], ['esd_emi', 'ESD/EMI'], ['pmic', 'Precious metals'], ['niin_asgmt', 'NIIN assignment']]) if (d[k]) h += '<div>' + l + '</div><div>' + dec(d[k]) + '</div>';
+    if (id.end_item_name) h += '<div>End item</div><div>' + esc(id.end_item_name) + '</div>';
+    h += '</div>';
+    const mg = it.management || [];
+    if (mg.length) { h += '<h3 style="font-size:13px;margin:10px 0 4px">Management</h3><table><tr><th>MOE</th><th>AAC</th><th>SOS</th><th>UI</th><th>Price</th><th>QUP</th><th>Effective</th></tr>'; for (const m of mg) h += '<tr><td>' + esc(m.moe) + ' <span class="muted">' + esc(m.moe_text) + '</span></td><td>' + esc(m.aac) + ' <span class="muted">' + esc(m.aac_text) + '</span></td><td>' + esc(m.sos) + '</td><td>' + esc(m.ui) + '</td><td>' + esc(money(m.unit_price)) + '</td><td>' + esc(m.qup) + '</td><td>' + esc(m.effective_date) + '</td></tr>'; h += '</table>'; }
+    const ps = it.parts || [];
+    if (ps.length) { h += '<h3 style="font-size:13px;margin:10px 0 4px">Reference / part numbers</h3><table><tr><th>Part number</th><th>CAGE</th><th>Company</th><th>Status</th><th>RNCC</th><th>RNVC</th></tr>'; for (const p of ps) h += '<tr><td>' + esc(p.part_number) + '</td><td>' + esc(p.cage_code) + '</td><td>' + esc(p.company_name) + '</td><td>' + esc(p.cage_status) + ' <span class="muted">' + esc(p.cage_status_text) + '</span></td><td title="' + esc(p.rncc_text) + '">' + esc(p.rncc) + '</td><td title="' + esc(p.rnvc_text) + '">' + esc(p.rnvc) + '</td></tr>'; h += '</table>'; }
+    const ch = it.characteristics || [];
+    if (ch.length) { h += '<h3 style="font-size:13px;margin:10px 0 4px">Characteristics</h3><table><tr><th>MRC</th><th>Requirement</th><th>Reply</th></tr>'; for (const c of ch) h += '<tr><td>' + esc(c.mrc) + '</td><td>' + esc(c.statement) + '</td><td>' + esc(c.reply) + '</td></tr>'; h += '</table>'; }
+    const rel = it.relations || [];
+    if (rel.length) { h += '<h3 style="font-size:13px;margin:10px 0 4px">FLIS relationships</h3><table>'; for (const r of rel) h += '<tr><td>' + relTag(r.type) + '</td><td>' + (r.niin ? '<button class="link" data-detail="' + r.niin + '">' + esc(r.nsn || r.niin) + '</button>' : '') + '</td><td>' + esc(r.item_name) + '</td><td>' + esc(r.text) + '</td><td>' + esc(r.code) + ' <span class="muted">' + esc(r.codeText) + '</span></td></tr>'; h += '</table>'; }
+    $('#dBody').innerHTML = h;
+  } catch (e) { showErr($('#dBody'), e); }
+}
+$('#dClose').onclick = () => $('#detail').close();
+
+// ---------- tabs, help, boot ----------
+function selectTab(t) {
+  $$('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  for (const n of ['matches', 'relations', 'quality', 'compare', 'help']) $('#tab-' + n).hidden = n !== t;
+  if (t === 'compare') renderCompare();
+}
+$('#tabs').addEventListener('click', ev => { const b = ev.target.closest('button[data-tab]'); if (b) selectTab(b.dataset.tab); });
+$('#go').onclick = find;
+$('#q').addEventListener('keydown', e => { if (e.key === 'Enter') find(); });
+$('#tab-help').innerHTML = `
+<div class="small" style="max-width:780px">
+<p><b>What it compares.</b> Every item in PUB LOG's V_CHARACTERISTICS has one reply per requirement (MRC), for example <i>OVERALL LENGTH: INCHES MINIMUM 0.657 AND INCHES MAXIMUM 0.781</i>. Replies are parsed into numbers with units (converted to one unit per dimension, so millimetres and inches compare) or into text values (one per "OR" alternative). Unit wording the parser does not recognise is never guessed: those replies are compared only by exact wording and listed under Data quality.</p>
+<p><b>Which items are candidates.</b> Items with the same item name code (INC) as the starting item. Add other item names under "Searching within" to widen the search (for example a bolt and a screw that share dimensions). INC 77777 (non-approved item names) is split by the actual item name.</p>
+<p><b>Criteria.</b> <i>Lock</i> requires the same value; <i>Range</i> keeps items whose value lies within (or overlaps, or covers) your bounds; <i>Any of / All of / None of</i> work on text values. Items with no reply for a criterion are dropped unless you tick "also keep items with no value here". The value lists and histograms show what the items that pass your <i>other</i> criteria have, so you can see what loosening one criterion would add.</p>
+<p><b>Ranking.</b> With a starting item, matches are ranked by similarity across all of its characteristics (text: overlap of values; numbers: closeness of the values), with characteristics the candidate lacks counted separately as n/a.</p>
+<p><b>Is it really an alternate?</b> Characteristics in FLIS are what was catalogued, not a full engineering definition. Treat matches as candidates for engineering review. The FLIS relationships tab shows links FLIS itself records (standardization decisions, cancelled/replacement NIINs, phrases and shared reference numbers). The Buy column is the acquisition advice code (red = not procurable, e.g. V terminal, T condemned).</p>
+</div>`;
+(async () => {
+  try {
+    const s = await api('/api/status');
+    const b = s.build || {};
+    setStatus('PUB LOG ' + (b.pub_date || '?') + ' - ' + Number(b.niins || 0).toLocaleString() + ' items with characteristics');
+    const hp = new URLSearchParams(location.hash.slice(1));
+    let crit = null; try { crit = hp.get('c') ? critFromHash(JSON.parse(hp.get('c'))) : null; } catch (e) { setStatus('Ignoring unreadable criteria in the link.', true); }
+    const pools = (hp.get('pools') || '').split(',').filter(Boolean).map(Number);
+    const showAll = crit && Object.keys(crit).length > 0;
+    if (hp.get('niin')) { $('#q').value = hp.get('niin'); setSeed(hp.get('niin').replace(/\D/g, '').slice(-9), { crit, pools, showAll }); }
+    else if (pools.length) setPoolOnly(pools[0], { crit, pools });
+  } catch (e) { setStatus('Server not reachable: ' + e.message, true); }
+})();
+</script>
+</body>
+</html>
