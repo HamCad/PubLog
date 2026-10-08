@@ -58,6 +58,30 @@ main { display: grid; grid-template-columns: minmax(360px, 38%) 1fr; gap: 14px; 
 .crit .vals label.seedv span.t { font-weight: 600; }
 .crit input[type=number] { width: 7.5em; padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
 .crit .blocker { font-size: 12px; color: var(--warn); margin-top: 4px; }
+.crit .vals { max-height: 260px; }
+button.tog { border: 0; background: none; padding: 0; width: 1.2em; color: var(--muted); cursor: pointer; font-size: 11px; flex: none; }
+.frow { display: flex; align-items: baseline; }
+.frow > label { flex: 1; min-width: 0; }
+.crit .vals .kids { margin-left: 1.2em; border-left: 1px dotted var(--line); padding-left: 4px; }
+.crit .vals label.fam span.t { font-weight: 600; }
+.crit .vals label.fam span.t i { font-weight: 400; font-style: normal; color: var(--muted); }
+.crit .vals label.leaf { padding-left: 1.2em; }
+.crit .vals label.implied { opacity: .75; }
+.crit .vfilter { width: 100%; padding: 3px 6px; margin-top: 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); font-size: 12px; }
+.widen { margin-top: 3px; }
+.tree { font-size: 12px; }
+.tree .frow { gap: 6px; flex-wrap: wrap; padding: 1px 0; }
+.tree .kids { margin-left: 1.2em; border-left: 1px dotted var(--line); padding-left: 6px; }
+.tree .leaf { padding: 1px 0 1px 1.2em; }
+.tree .dim, .tree .dim button.link { color: var(--muted); }
+.tree .lbl { font-weight: 600; }
+.tree button.fam { font-size: 11px; padding: 0 6px; }
+.famchip { border: 1px solid var(--line); background: var(--chip); border-radius: 8px; padding: 3px 8px; margin: 3px 0; font-size: 12px; }
+.famchip .frow { gap: 4px; }
+.famchip button.x { border: 0; background: none; padding: 0 0 0 4px; cursor: pointer; color: var(--muted); margin-left: auto; }
+.famchip .famlist { max-height: 200px; overflow: auto; margin: 4px 0; }
+.famchip .famlist label { display: flex; gap: 6px; align-items: baseline; }
+.famchip .famlist label .n { color: var(--muted); margin-left: auto; padding-left: 8px; }
 .hist { width: 100%; height: 46px; display: block; margin-top: 4px; }
 .hist rect.bar { fill: var(--accent); opacity: .55; }
 .hist rect.band { fill: var(--warn); opacity: .18; }
@@ -147,7 +171,9 @@ const keyOf = (mrc, qual) => mrc + '|' + (qual || '');
 
 const st = {
   seed: null, item: null, pools: [], poolInfo: {}, profile: null, crit: {}, results: null, facets: {},
-  compare: new Set(), showAll: false, filter: '', offset: 0, seq: 0, lastReq: null, counts: []
+  compare: new Set(), showAll: false, filter: '', offset: 0, seq: 0, lastReq: null, counts: [],
+  // Item-name families: st.pools (what is searched) = st.loose + family members - st.excl.
+  loose: [], fams: [], excl: new Set(), ancCache: {}, treeOpen: new Set()
 };
 
 async function api(path, body) {
@@ -185,19 +211,88 @@ function renderResolve(r) {
   }
   const pools = r.pools ? r.pools.pools : [];
   if (pools && pools.length) {
-    h += '<div class="small muted" style="margin-top:8px">Item names - browse a whole group without a starting item:</div><table><tr><th>Item name</th><th>INC</th><th>Items</th></tr>';
-    for (const pl of pools) h += '<tr><td><button class="link" data-pool="' + pl.pool + '">' + esc(pl.name) + '</button></td><td>' + esc(pl.inc) + '</td><td>' + pl.niins + '</td></tr>';
-    h += '</table>';
+    st.lastTree = { r: r.pools, q: r.query };
+    h += '<div class="small muted" style="margin-top:8px">Item names - pick one, or a whole family (every name under it), to browse without a starting item:</div><div id="resolveTree">' + nameTreeHtml(r.pools, r.query, 'browse') + '</div>';
     const col = r.pools.colloquial || [];
     if (col.length) h += '<div class="small muted" style="margin-top:6px">Also known as: ' + col.map(c => '<button class="link" data-pool="' + c.pool + '">' + esc(c.colloquial_name) + ' &rarr; ' + esc(c.name) + '</button>').join(', ') + '</div>';
   }
   if ((!r.items || !r.items.length) && (!pools || !pools.length)) h += '<div class="muted">Nothing found. Part numbers are matched without punctuation (MS35206-245 = MS35206245); use CAGE:PN to pin the manufacturer.</div>';
   p.innerHTML = h;
 }
+// ---------- item-name tree ----------
+// FLIS item names read noun first, then modifiers: NUT,SELF-LOCKING,HEXAGON.
+// The tree nests them on the commas; a family is every name under a node.
+const NON_APPROVED = 77777;
+const nfmt = n => Number(n || 0).toLocaleString();
+function nameSegs(n) { return String(n || '').split(',').map(x => x.trim()).filter(Boolean); }
+function inNameFam(name, fam) { const n = nameSegs(name).join(','), f = nameSegs(fam).join(','); return n === f || n.startsWith(f + ','); }
+function buildNameTree(pools) {
+  const root = { kids: new Map() };
+  for (const p of pools) {
+    if (+p.inc === NON_APPROVED) continue;
+    let node = root; const path = [];
+    for (const sgm of nameSegs(p.name)) {
+      path.push(sgm);
+      if (!node.kids.has(sgm)) node.kids.set(sgm, { label: sgm, name: path.join(','), kids: new Map(), pools: [] });
+      node = node.kids.get(sgm);
+    }
+    // PUB LOG cuts item names at 32 characters, so several INCs can share one.
+    node.pools.push(p);
+  }
+  const agg = n => { n.count = n.pools.length; n.niins = n.pools.reduce((a, p) => a + +p.niins, 0); n.match = n.pools.some(p => p.match); n.allMatch = n.pools.every(p => p.match); for (const k of n.kids.values()) { agg(k); n.count += k.count; n.niins += k.niins; n.match = n.match || k.match; n.allMatch = n.allMatch && k.allMatch; } };
+  for (const k of root.kids.values()) agg(k);
+  return root;
+}
+// ctx 'browse': picking starts a new search; ctx 'add': adds to "Searching within".
+function nameTreeHtml(res, q, ctx) {
+  const pools = res.pools || [], tree = buildNameTree(pools);
+  const odd = {}; for (const o of res.nonApprovedByRoot || []) odd[o.root] = o;
+  const Q = String(q || '').trim().toUpperCase();
+  const roots = [...tree.kids.values()].sort((a, b) => ((b.label.startsWith(Q)) - (a.label.startsWith(Q))) || (b.niins - a.niins));
+  const nounSearch = roots.some(n => n.label.startsWith(Q));
+  const pAttr = ctx === 'browse' ? 'data-pool' : 'data-addpool', fAttr = ctx === 'browse' ? 'data-browsefam' : 'data-addfam';
+  const leaf = (p, label, many) => '<div class="leaf' + (p.match ? '' : ' dim') + '"><button class="link" ' + pAttr + '="' + p.pool + '">' + esc(label) + '</button> <span class="muted">' + (many ? 'INC ' + esc(p.inc) + ' &middot; ' : '') + nfmt(p.niins) + '</span></div>';
+  const node = (n, depth) => {
+    let label = n.label;
+    while (!n.pools.length && n.kids.size === 1) { n = [...n.kids.values()][0]; label += ',' + n.label; }
+    if (!n.kids.size && n.pools.length === 1) return leaf(n.pools[0], label, false);
+    const key = ctx + ':' + n.name;
+    // Open the first roots for a noun search ("nut"), and any group hiding a
+    // partial match for a modifier search ("extended washer").
+    const auto = (depth === 0 && (roots.length <= 2 || n.label.startsWith(Q)) && roots.indexOf(n) < 3) || (!nounSearch && n.match && !n.allMatch);
+    const open = st.treeOpen.has(key) || (!st.treeOpen.has('-' + key) && auto);
+    const o = depth === 0 ? odd[n.name] : null;
+    let h = '<div class="frow' + (n.match ? '' : ' dim') + '"><button class="tog" data-ntog="' + esc(key) + '">' + (open ? '&#9662;' : '&#9656;') + '</button><span class="lbl">' + esc(label) + '</span><span class="muted">' + n.count + ' names &middot; ' + nfmt(n.niins) + ' items</span>';
+    h += '<button class="fam" ' + fAttr + '="' + esc(n.name) + '" title="every item name starting ' + esc(n.name) + '">' + (ctx === 'browse' ? 'Search all ' + n.count : 'Add all ' + n.count) + '</button></div>';
+    if (!open) return h;
+    h += '<div class="kids">';
+    for (const p of n.pools) h += leaf(p, n.name + (n.kids.size ? ' (this name alone)' : ''), n.pools.length > 1);
+    for (const k of [...n.kids.values()].sort((a, b) => b.niins - a.niins)) h += node(k, depth + 1);
+    if (o) h += '<div class="leaf small muted">+ ' + nfmt(o.pools) + ' non-approved names (INC 77777, ' + nfmt(o.niins) + ' items) <button class="link" ' + fAttr + '="' + esc(n.name) + '" data-na="1">search them too</button></div>';
+    return h + '</div>';
+  };
+  let h = '<div class="tree">' + roots.map(n => node(n, 0)).join('') + '</div>';
+  const oddHits = pools.filter(p => +p.inc === NON_APPROVED);
+  if (oddHits.length) h += '<div class="small muted" style="margin-top:6px">Non-approved names (INC 77777) matching:</div><div class="tree">' + oddHits.map(p => '<div class="leaf"><button class="link" ' + pAttr + '="' + p.pool + '">' + esc(p.name) + '</button> <span class="muted">' + nfmt(p.niins) + '</span></div>').join('') + '</div>';
+  return h;
+}
+function toggleTree(key, rerender) {
+  const open = $('[data-ntog="' + CSS.escape(key) + '"]').innerHTML.charCodeAt(0) === 9662;
+  if (open) { st.treeOpen.delete(key); st.treeOpen.add('-' + key); } else { st.treeOpen.add(key); st.treeOpen.delete('-' + key); }
+  rerender();
+}
 document.addEventListener('click', ev => {
-  const b = ev.target.closest('[data-seed],[data-pool],[data-detail]');
+  const nt = ev.target.closest('[data-ntog]');
+  if (nt) {
+    const key = nt.dataset.ntog;
+    if (key.startsWith('browse:') && st.lastTree) toggleTree(key, () => { $('#resolveTree').innerHTML = nameTreeHtml(st.lastTree.r, st.lastTree.q, 'browse'); });
+    else if (st.lastAddTree) toggleTree(key, () => { $('#poolHits').innerHTML = nameTreeHtml(st.lastAddTree.r, st.lastAddTree.q, 'add'); });
+    return;
+  }
+  const b = ev.target.closest('[data-seed],[data-pool],[data-detail],[data-browsefam]');
   if (!b) return;
   if (b.dataset.seed) { $('#detail').open && $('#detail').close(); setSeed(b.dataset.seed); }
+  else if (b.dataset.browsefam) setFamilyOnly(b.dataset.browsefam, b.dataset.na === '1');
   else if (b.dataset.pool) setPoolOnly(+b.dataset.pool);
   else if (b.dataset.detail) openDetail(b.dataset.detail);
 });
@@ -207,9 +302,12 @@ async function setSeed(niin, preset) {
   try {
     const it = await api('/api/item?niin=' + niin);
     st.seed = it.niin; st.item = it; st.crit = {}; st.compare = new Set(); st.offset = 0;
-    st.pools = it.pool != null ? [it.pool] : [];
-    if (preset && preset.pools && preset.pools.length) st.pools = [...new Set(st.pools.concat(preset.pools))];
+    st.loose = it.pool != null ? [it.pool] : []; st.fams = []; st.excl = new Set();
+    if (preset && preset.pools && preset.pools.length) st.loose = [...new Set(st.loose.concat(preset.pools))];
     if (preset && preset.crit) st.crit = preset.crit;
+    if (preset && preset.fams) for (const f of preset.fams) await addFamily(f[0], !!f[1], true);
+    if (preset && preset.excl) st.excl = new Set(preset.excl);
+    recomputePools();
     if (preset && preset.showAll) { st.showAll = true; $('#showAll').checked = true; }
     renderSeed();
     renderRelations();
@@ -223,11 +321,17 @@ async function setSeed(niin, preset) {
   } catch (e) { setStatus(e.message, true); }
 }
 async function setPoolOnly(pool, preset) {
-  st.seed = null; st.item = null; st.crit = (preset && preset.crit) || {}; st.pools = (preset && preset.pools) || [pool]; st.compare = new Set(); st.offset = 0;
-  $('#seedPanel').innerHTML = '<h2>Browsing an item name</h2><div class="muted small">No starting item: set criteria below to narrow the group. Results are sorted by NIIN.</div>';
+  st.seed = null; st.item = null; st.crit = (preset && preset.crit) || {}; st.loose = (preset && preset.pools) || (pool != null ? [pool] : []); st.compare = new Set(); st.offset = 0;
+  st.fams = []; st.excl = new Set((preset && preset.excl) || []);
+  $('#seedPanel').innerHTML = '<h2>Browsing item names</h2><div class="muted small">No starting item: set criteria below to narrow the group. Results are sorted by NIIN.</div>';
   $('#tab-relations').innerHTML = '<div class="muted">Pick a starting item to see what FLIS already links it to.</div>';
   st.showAll = true; $('#showAll').checked = true;
+  try { if (preset && preset.fams) for (const f of preset.fams) await addFamily(f[0], !!f[1], true); } catch (e) { setStatus(e.message, true); }
+  recomputePools();
   await loadProfile();
+}
+async function setFamilyOnly(name, na) {
+  await setPoolOnly(null, { pools: [], fams: [[name, na ? 1 : 0]] });
 }
 
 function renderSeed() {
@@ -250,32 +354,112 @@ function renderSeed() {
 }
 
 // ---------- pools ----------
+function recomputePools() {
+  const set = new Set(st.loose);
+  for (const f of st.fams) for (const p of f.pools) if (!st.excl.has(p)) set.add(p);
+  st.pools = [...set];
+}
+// Adds every item name in a family (and drops narrower families it covers).
+async function addFamily(name, na, noload) {
+  setStatus('Loading the ' + name + ' family ...');
+  const r = await api('/api/family?name=' + encodeURIComponent(name) + '&nonApproved=' + (na ? 1 : 0));
+  for (const p of r.pools) st.poolInfo[p.pool] = Object.assign(st.poolInfo[p.pool] || {}, p);
+  st.fams = st.fams.filter(f => !inNameFam(f.name, r.name));
+  const ids = r.pools.map(p => +p.pool);
+  for (const p of ids) st.excl.delete(p);
+  st.fams.push({ name: r.name, na: !!na, pools: ids, approved: r.approved, nonApproved: r.nonApproved, truncated: r.truncated });
+  setStatus('');
+  if (!noload) { recomputePools(); st.offset = 0; await loadProfile(); }
+}
 async function loadProfile() {
+  if (!st.pools.length) {
+    renderPools();
+    $('#criteria').hidden = true;
+    $('#tab-matches').innerHTML = '<div class="muted">Nothing to search: every item name is unticked. Tick one under "Searching within".</div>';
+    return;
+  }
   try {
+    if (st.pools.length > 40) setStatus('Loading ' + st.pools.length + ' item names ...');
     const prof = await api('/api/pool?pool=' + st.pools.join(',') + (st.seed ? '&seed=' + st.seed : ''));
     st.profile = prof;
     for (const p of prof.pools) st.poolInfo[p.pool] = p;
     renderPools();
     renderCriteria();
     loadQuality();
+    if (st.pools.length > 40) setStatus('');
     search();
   } catch (e) { setStatus(e.message, true); }
 }
 function renderPools() {
   $('#poolPanel').hidden = false;
-  $('#poolChips').innerHTML = st.pools.map(p => { const i = st.poolInfo[p] || {}; return '<span class="chip">' + esc(i.name || p) + ' <span class="muted">' + (i.niins || '') + '</span>' + (st.pools.length > 1 ? '<button data-rmpool="' + p + '" title="remove">&times;</button>' : '') + '</span>'; }).join('');
+  const inFams = new Set(); let h = '';
+  const info = p => st.poolInfo[p] || {};
+  for (const f of st.fams) {
+    const on = f.pools.filter(p => !st.excl.has(p)), items = on.reduce((a, p) => a + (+info(p).niins || 0), 0);
+    f.pools.forEach(p => inFams.add(p));
+    const key = 'fam:' + f.name, open = st.treeOpen.has(key);
+    h += '<div class="famchip"><div class="frow"><button class="tog" data-ftog="' + esc(key) + '" title="show the item names">' + (open ? '&#9662;' : '&#9656;') + '</button><span><b>' + esc(f.name) + '</b> family <span class="muted">' + (on.length === f.pools.length ? 'all ' + on.length : on.length + ' of ' + f.pools.length) + ' names &middot; ' + nfmt(items) + ' items</span></span><button class="x" data-rmfam="' + esc(f.name) + '" title="remove the family">&times;</button></div>';
+    if (open) {
+      h += '<div class="famlist">' + f.pools.slice().sort((a, b) => String(info(a).name).localeCompare(String(info(b).name))).map(p => '<label><input type="checkbox" data-togpool="' + p + '"' + (st.excl.has(p) ? '' : ' checked') + '><span>' + esc(info(p).name || p) + (+info(p).inc === NON_APPROVED ? ' <span class="muted">(77777)</span>' : '') + '</span><span class="n">' + nfmt(info(p).niins) + '</span></label>').join('') + '</div>';
+      if (f.nonApproved && f.nonApproved.pools) h += '<label class="small"><input type="checkbox" data-famna="' + esc(f.name) + '"' + (f.na ? ' checked' : '') + '> include ' + nfmt(f.nonApproved.pools) + ' non-approved names (INC 77777, ' + nfmt(f.nonApproved.niins) + ' items)</label>';
+      if (f.truncated) h += '<div class="small muted">Only the 2,000 largest non-approved names are included.</div>';
+    }
+    h += '</div>';
+  }
+  const loose = st.loose.filter(p => !inFams.has(p));
+  h += loose.map(p => '<span class="chip">' + esc(info(p).name || p) + ' <span class="muted">' + nfmt(info(p).niins) + '</span>' + (st.pools.length > 1 ? '<button data-rmpool="' + p + '" title="remove">&times;</button>' : '') + '</span>').join('');
+  if (st.pools.length > 1) h += '<div class="small muted" style="margin-top:4px">' + st.pools.length + ' item names &middot; ' + nfmt(st.pools.reduce((a, p) => a + (+info(p).niins || 0), 0)) + ' items with characteristics</div>';
+  h += '<div id="widen" class="small" style="margin-top:4px"></div>';
+  $('#poolChips').innerHTML = h;
+  renderWiden();
 }
-$('#poolChips').addEventListener('click', ev => { const b = ev.target.closest('[data-rmpool]'); if (!b) return; st.pools = st.pools.filter(p => p !== +b.dataset.rmpool); loadProfile(); });
+// "Widen to: NUT,SELF-LOCKING (24 names) - NUT (86 names)", from the starting
+// item's name (or the family / single name being browsed).
+async function renderWiden() {
+  const box = $('#widen'); if (!box) return;
+  let base = st.fams.length ? st.fams[st.fams.length - 1].name : null;
+  if (!base && st.item && st.item.pool != null) base = (st.poolInfo[st.item.pool] || {}).name || (st.item.identification || {}).item_name;
+  if (!base && st.loose.length === 1) base = (st.poolInfo[st.loose[0]] || {}).name;
+  if (!base || nameSegs(base).length < 2) { box.innerHTML = ''; return; }
+  try {
+    const a = st.ancCache[base] || (st.ancCache[base] = await api('/api/ancestors?name=' + encodeURIComponent(base)));
+    const list = (a.ancestors || []).filter(x => (x.pools + x.nonApprovedPools) > 1 && !st.fams.some(f => inNameFam(x.name, f.name)));
+    if (!list.length || $('#widen') !== box) { box.innerHTML = ''; return; }
+    box.innerHTML = 'Widen to: ' + list.map(x => '<button class="link" data-addfam="' + esc(x.name) + '"' + (x.pools ? '' : ' data-na="1"') + '>' + esc(x.name) + '</button> <span class="muted">(' + (x.pools ? x.pools + ' names, ' + nfmt(x.niins) + ' items' : x.nonApprovedPools + ' non-approved names') + ')</span>').join(' &middot; ');
+  } catch (e) { box.innerHTML = ''; }
+}
+$('#poolChips').addEventListener('click', ev => {
+  const t = ev.target.closest('[data-ftog]');
+  if (t) { const k = t.dataset.ftog; if (st.treeOpen.has(k)) st.treeOpen.delete(k); else st.treeOpen.add(k); renderPools(); return; }
+  const r = ev.target.closest('[data-rmfam]');
+  if (r) { st.fams = st.fams.filter(f => f.name !== r.dataset.rmfam); recomputePools(); st.offset = 0; loadProfile(); return; }
+  const b = ev.target.closest('[data-rmpool]'); if (!b) return;
+  st.loose = st.loose.filter(p => p !== +b.dataset.rmpool); recomputePools(); st.offset = 0; loadProfile();
+});
+$('#poolChips').addEventListener('change', async ev => {
+  const t = ev.target;
+  if (t.dataset.togpool) { const p = +t.dataset.togpool; if (t.checked) st.excl.delete(p); else st.excl.add(p); }
+  else if (t.dataset.famna) { const f = st.fams.find(x => x.name === t.dataset.famna); if (!f) return; try { await addFamily(f.name, t.checked, true); } catch (e) { setStatus(e.message, true); return; } }
+  else return;
+  recomputePools(); st.offset = 0; loadProfile();
+});
 async function poolSearch() {
   const q = $('#poolQ').value.trim(); if (!q) return;
   try {
     const r = await api('/api/pools?q=' + encodeURIComponent(q));
-    $('#poolHits').innerHTML = (r.pools || []).slice(0, 12).map(p => '<div><button class="link" data-addpool="' + p.pool + '">' + esc(p.name) + '</button> <span class="muted">' + p.niins + ' items, INC ' + esc(p.inc) + '</span></div>').join('') || '<div class="muted">No item names match.</div>';
+    st.lastAddTree = { r, q };
+    $('#poolHits').innerHTML = (r.pools || []).length ? nameTreeHtml(r, q, 'add') : '<div class="muted">No item names match.</div>';
   } catch (e) { showErr($('#poolHits'), e); }
 }
 $('#poolAdd').onclick = poolSearch;
 $('#poolQ').addEventListener('keydown', e => { if (e.key === 'Enter') poolSearch(); });
-$('#poolHits').addEventListener('click', ev => { const b = ev.target.closest('[data-addpool]'); if (!b) return; const p = +b.dataset.addpool; if (!st.pools.includes(p)) st.pools.push(p); $('#poolHits').innerHTML = ''; $('#poolQ').value = ''; loadProfile(); });
+$('#poolPanel').addEventListener('click', async ev => {
+  const f = ev.target.closest('[data-addfam]');
+  if (f) { $('#poolHits').innerHTML = ''; $('#poolQ').value = ''; try { await addFamily(f.dataset.addfam, f.dataset.na === '1'); } catch (e) { setStatus(e.message, true); } return; }
+  const b = ev.target.closest('[data-addpool]'); if (!b) return;
+  const p = +b.dataset.addpool; st.excl.delete(p); if (!st.loose.includes(p)) st.loose.push(p);
+  $('#poolHits').innerHTML = ''; $('#poolQ').value = ''; recomputePools(); st.offset = 0; loadProfile();
+});
 
 // ---------- criteria ----------
 function seedAtomsByKey() {
@@ -330,6 +514,7 @@ function renderCriteria() {
   }
   const hidden = st.profile ? st.profile.chars.length - list.length : 0;
   $('#critList').innerHTML = out.join('') + (hidden > 0 ? '<div class="small muted">' + hidden + ' more characteristic(s) in this group' + (st.seed && !st.showAll ? ' - tick "show characteristics the starting item lacks"' : '') + '.</div>' : '');
+  markPartial($('#critList'));
 }
 function controlHtml(c, cr) {
   const f = st.facets[c.key];
@@ -341,22 +526,82 @@ function controlHtml(c, cr) {
     if (c.seed) h += '<div class="row small" style="margin-top:3px">around start: ' + [0, 1, 5, 10, 25, 50].map(p => '<button class="link" data-widen="' + p + '">' + (p ? '&plusmn;' + p + '%' : 'exact') + '</button>').join(' &middot; ') + '</div>';
     if (f && f.hist) h += histSvg(f.hist, cr, c);
   } else if (['any', 'all', 'none', 'exact'].includes(cr.mode)) {
-    const seedVals = new Set((c.seed || []).filter(a => a.kind === 'TXT').map(a => a.txt));
-    const vals = (f && f.values) ? f.values : (c.top_txt || []);
-    const sel = cr.values || new Set();
-    if (cr.mode === 'exact') h += '<div class="small muted">Must have exactly: ' + esc([...sel].join(' + ')) + '</div>';
+    const sel = cr.values || new Set(), fs = cr.fams || new Set();
+    if (cr.mode === 'exact') h += '<div class="small muted">Must have exactly: ' + esc([...sel].concat([...fs].map(x => x + ' (any kind)')).join(' + ')) + '</div>';
     else {
-      h += '<div class="vals">';
-      const shown = new Set();
-      for (const v of vals) { shown.add(v.txt); h += '<label class="' + (seedVals.has(v.txt) ? 'seedv' : '') + '"><input type="checkbox" data-val="' + esc(v.txt) + '"' + (sel.has(v.txt) ? ' checked' : '') + '><span class="t">' + esc(v.txt) + '</span><span class="n">' + v.n + '</span></label>'; }
-      for (const v of sel) if (!shown.has(v)) h += '<label><input type="checkbox" data-val="' + esc(v) + '" checked><span class="t">' + esc(v) + '</span><span class="n">0</span></label>';
-      h += '</div>';
-      if (f && f.distinct > (f.values || []).length) h += '<div class="small muted">showing ' + (f.values || []).length + ' of ' + f.distinct + ' values</div>';
+      h += '<input type="text" class="vfilter" placeholder="filter values" value="' + esc(cr._filter || '') + '">';
+      h += valsHtml(c, cr, f);
+      if (f && f.distinct > (f.values || []).length) h += '<div class="small muted">listing the ' + (f.values || []).length + ' most common of ' + f.distinct + ' values; a ticked family also covers the ones not listed</div>';
     }
+    h += textWidenHtml(c, cr, f);
   }
   if (!['absent', 'exists'].includes(cr.mode)) h += '<label class="small"><input type="checkbox" class="missing"' + (cr.missing === 'include' ? ' checked' : '') + '> also keep items with no value here' + (f ? ' <span class="muted">(' + f.missing + ')</span>' : '') + '</label>';
   if (c.qual) h += ' <label class="small" title="match this characteristic whatever its location wording"><input type="checkbox" class="anyq"' + (cr.anyQual ? ' checked' : '') + '> any location</label>';
   return h;
+}
+// ---------- value families ----------
+// A family is a leading run of words shared by several values: STEEL covers
+// STEEL, STEEL COMP 302, STEEL CORROSION RESISTING ... Ticking a family matches
+// every value in it, including ones not listed here (the server expands it).
+function inFam(v, fam) { return v === fam || (v.length > fam.length && v.startsWith(fam) && (v[fam.length] === ' ' || v[fam.length] === ',')); }
+function famsOf(f, c) { return (f && f.families) || []; }
+function valsHtml(c, cr, f) {
+  const seedVals = new Set((c.seed || []).filter(a => a.kind === 'TXT').map(a => a.txt));
+  const vals = ((f && f.values) ? f.values : (c.top_txt || [])).slice();
+  const sel = cr.values || new Set(), fs = cr.fams || new Set();
+  const fams = famsOf(f, c).slice();
+  for (const v of sel) if (!vals.some(x => x.txt === v)) vals.push({ txt: v, n: 0 });
+  for (const x of fs) if (!fams.some(y => y.txt === x)) fams.push({ txt: x, n: 0, members: 0 });
+  const filt = (cr._filter || '').trim().toUpperCase();
+  // Nest: each value and family sits under the narrowest family that covers it.
+  const byLen = fams.slice().sort((a, b) => b.txt.length - a.txt.length);
+  // A value sits inside the family of the same wording when there is one.
+  const parentOf = (t, self) => { if (!self && fams.some(g => g.txt === t)) return t; for (const g of byLen) if (g.txt !== t && g.txt.length < t.length && inFam(t, g.txt)) return g.txt; return null; };
+  const kids = new Map([[null, []]]);
+  for (const g of fams) kids.set(g.txt, []);
+  for (const g of fams) kids.get(parentOf(g.txt, true)).push({ fam: g });
+  for (const v of vals) kids.get(parentOf(v.txt, false)).push({ val: v });
+  const covered = t => [...fs].some(x => inFam(t, x));
+  const matches = new Map();
+  const hit = node => {
+    const t = node.fam ? node.fam.txt : node.val.txt;
+    let m = !filt || t.includes(filt);
+    if (node.fam) for (const k of kids.get(t)) if (hit(k)) m = true;
+    matches.set(node, m); return m;
+  };
+  const top = kids.get(null);
+  top.forEach(hit);
+  const sortK = list => list.slice().sort((a, b) => ((b.fam || b.val).n - (a.fam || a.val).n) || ((a.fam || a.val).txt < (b.fam || b.val).txt ? -1 : 1));
+  const node = n => {
+    if (!matches.get(n)) return '';
+    if (n.val) {
+      const v = n.val, imp = covered(v.txt);
+      return '<label class="leaf' + (seedVals.has(v.txt) ? ' seedv' : '') + (imp ? ' implied' : '') + '"><input type="checkbox" data-val="' + esc(v.txt) + '"' + (sel.has(v.txt) || imp ? ' checked' : '') + (imp ? ' disabled' : '') + '><span class="t">' + esc(v.txt) + (fams.some(g => g.txt === v.txt) ? ' <i class="muted">(as written)</i>' : '') + '</span><span class="n">' + v.n + '</span></label>';
+    }
+    const g = n.fam, own = fs.has(g.txt), imp = !own && covered(g.txt);
+    const ch = kids.get(g.txt);
+    const partial = !own && !imp && (vals.some(v => sel.has(v.txt) && inFam(v.txt, g.txt)) || [...fs].some(x => x !== g.txt && inFam(x, g.txt)));
+    const open = filt || (cr._open && cr._open.has(g.txt));
+    let h = '<div class="frow"><button class="tog" data-vtog="' + esc(g.txt) + '" title="' + (open ? 'collapse' : 'show the kinds') + '">' + (open ? '&#9662;' : '&#9656;') + '</button><label class="fam' + (imp ? ' implied' : '') + '"><input type="checkbox" data-fam="' + esc(g.txt) + '"' + (own || imp ? ' checked' : '') + (imp ? ' disabled' : '') + (partial ? ' data-partial="1"' : '') + '><span class="t">' + esc(g.txt) + ' <i>any kind' + (g.members ? ' (' + g.members + ')' : '') + '</i></span><span class="n">' + g.n + '</span></label></div>';
+    if (open) { h += '<div class="kids">'; for (const k of sortK(ch)) h += node(k); h += '</div>'; }
+    return h;
+  };
+  let h = '<div class="vals">';
+  for (const n of sortK(top)) h += node(n);
+  if (filt && ![...matches.values()].some(Boolean)) h += '<div class="small muted">No listed value contains "' + esc(cr._filter) + '".</div>';
+  return h + '</div>';
+}
+// "around start: exact - STEEL COMP - STEEL": the text counterpart of the +-% links.
+function textWidenHtml(c, cr, f) {
+  const sv = (c.seed || []).filter(a => a.kind === 'TXT').map(a => a.txt);
+  if (!sv.length || cr.mode === 'none') return '';
+  const fams = famsOf(f, c).filter(g => sv.some(v => inFam(v, g.txt) && v !== g.txt)).sort((a, b) => b.txt.length - a.txt.length);
+  if (!fams.length) return '';
+  const isExact = cr.mode === 'exact';
+  const cur = cr.fams && cr.fams.size === 1 ? [...cr.fams][0] : null;
+  let h = '<div class="row small widen">around start: <button class="link" data-twiden=""' + (isExact ? ' style="font-weight:600"' : '') + '>exact</button>';
+  for (const g of fams) h += ' &middot; <button class="link" data-twiden="' + esc(g.txt) + '" title="' + (g.members || '') + ' kinds, ' + g.n + ' items"' + (cur === g.txt && !isExact ? ' style="font-weight:600"' : '') + '>any ' + esc(g.txt) + '</button>';
+  return h + '</div>';
 }
 function histSvg(hs, cr, c) {
   const W = 300, H = 46, n = hs.counts.length, max = Math.max(1, ...hs.counts);
@@ -372,14 +617,14 @@ function histSvg(hs, cr, c) {
 function charByKey(key) { return (st.profile.chars || []).find(c => keyOf(c.mrc, c.qual) === key); }
 function initCrit(c, mode) {
   const sk = seedAtomsByKey()[keyOf(c.mrc, c.qual)] || [];
-  const cr = { mode, values: new Set(), lo: null, hi: null, test: 'within', missing: 'exclude', anyQual: false };
+  const cr = { mode, values: new Set(), fams: new Set(), lo: null, hi: null, test: 'within', missing: 'exclude', anyQual: false, _open: new Set() };
   const num = sk.filter(a => a.kind !== 'TXT');
   if (num.length) {
     const lo = Math.min(...num.map(a => a.loDisplay != null ? a.loDisplay : a.lo)), hi = Math.max(...num.map(a => a.hiDisplay != null ? a.hiDisplay : a.hi));
     const pad = mode === 'range' ? Math.abs((lo + hi) / 2) * 0.1 : 0;
     cr.lo = +(lo - pad).toPrecision(6); cr.hi = +(hi + pad).toPrecision(6);
   }
-  for (const a of sk) if (a.kind === 'TXT') cr.values.add(a.txt);
+  for (const a of sk) if (a.kind === 'TXT') { cr.values.add(a.txt); for (const g of famsOf(st.facets[keyOf(c.mrc, c.qual)], c)) if (inFam(a.txt, g.txt)) cr._open.add(g.txt); }
   if (mode === 'lock' && !c.numeric) cr.mode = 'exact';
   return cr;
 }
@@ -398,11 +643,45 @@ $('#critList').addEventListener('change', ev => {
     else if (ev.target.classList.contains('missing')) cr.missing = ev.target.checked ? 'include' : 'exclude';
     else if (ev.target.classList.contains('anyq')) cr.anyQual = ev.target.checked;
     else if (ev.target.dataset.val != null) { if (ev.target.checked) cr.values.add(ev.target.dataset.val); else cr.values.delete(ev.target.dataset.val); }
+    else if (ev.target.dataset.fam != null) {
+      const g = ev.target.dataset.fam; cr.fams = cr.fams || new Set();
+      if (ev.target.checked) {
+        // The family now covers its values and narrower families: drop them.
+        for (const v of [...cr.values]) if (inFam(v, g)) cr.values.delete(v);
+        for (const x of [...cr.fams]) if (inFam(x, g)) cr.fams.delete(x);
+        cr.fams.add(g);
+      } else cr.fams.delete(g);
+    }
+    else if (ev.target.classList.contains('vfilter')) return;
     if (cr.mode === 'lock' && (ev.target.classList.contains('lo') || ev.target.classList.contains('hi'))) cr.mode = 'range';
   }
   st.offset = 0; renderCriteria(); searchSoon();
 });
+function markPartial(root) { $$('input[data-partial]', root).forEach(i => { i.indeterminate = true; }); }
+$('#critList').addEventListener('input', ev => {
+  if (!ev.target.classList.contains('vfilter')) return;
+  const box = ev.target.closest('.crit'), key = box.dataset.key, c = charByKey(key), cr = st.crit[key]; if (!cr) return;
+  cr._filter = ev.target.value;
+  $('.vals', box).outerHTML = valsHtml(c, cr, st.facets[key]);
+  markPartial(box);
+});
 $('#critList').addEventListener('click', ev => {
+  const vt = ev.target.closest('[data-vtog]');
+  if (vt) {
+    const box = vt.closest('.crit'), key = box.dataset.key, cr = st.crit[key], g = vt.dataset.vtog;
+    cr._open = cr._open || new Set();
+    if (cr._open.has(g)) cr._open.delete(g); else cr._open.add(g);
+    $('.vals', box).outerHTML = valsHtml(charByKey(key), cr, st.facets[key]); markPartial(box); return;
+  }
+  const t = ev.target.closest('[data-twiden]');
+  if (t) {
+    const key = t.closest('.crit').dataset.key, c = charByKey(key), cr = st.crit[key];
+    const sv = (seedAtomsByKey()[key] || []).filter(a => a.kind === 'TXT').map(a => a.txt);
+    const g = t.dataset.twiden;
+    if (!g) { cr.mode = 'exact'; cr.values = new Set(sv); cr.fams = new Set(); }
+    else { cr.mode = 'any'; cr.fams = new Set([g]); cr.values = new Set(sv.filter(v => !inFam(v, g))); cr._open = cr._open || new Set(); cr._open.add(g); }
+    st.offset = 0; renderCriteria(); searchSoon(); return;
+  }
   const b = ev.target.closest('[data-widen]'); if (!b) return;
   const box = b.closest('.crit'), key = box.dataset.key, c = charByKey(key), cr = st.crit[key];
   const sk = (seedAtomsByKey()[key] || []).filter(a => a.kind !== 'TXT'); if (!sk.length) return;
@@ -427,23 +706,33 @@ function buildRequest(limit, offset) {
     const mode = cr.mode === 'lock' ? 'range' : cr.mode;
     const o = { mrc: c.mrc, qual: c.qual, mode, test: cr.mode === 'lock' ? 'within' : cr.test, missing: cr.missing, anyQual: cr.anyQual };
     if (mode === 'range') { o.lo = cr.lo; o.hi = cr.hi; o.unit = c.displayUnit; }
-    else o.values = [...(cr.values || [])];
+    else { o.values = [...(cr.values || [])]; o.families = [...(cr.fams || [])]; }
     cr._ix = i++;
     constraints.push(o);
   }
-  const facets = visibleChars().map(c => ({ mrc: c.mrc, qual: c.qual }));
+  // Text criteria being picked from get a longer value list than the rest.
+  const facets = visibleChars().map(c => { const cr = st.crit[c.key]; return { mrc: c.mrc, qual: c.qual, limit: cr && ['any', 'all', 'none'].includes(cr.mode) ? 400 : 60 }; });
   return { pools: st.pools, seed: st.seed, constraints, facets, limit, offset, sort: st.seed ? 'score' : 'niin' };
 }
 // The page state lives in the URL hash, so a search can be bookmarked or sent to a colleague.
 function saveHash() {
   const c = {};
-  for (const [k, cr] of Object.entries(st.crit)) c[k] = { m: cr.mode, v: [...(cr.values || [])], lo: cr.lo, hi: cr.hi, t: cr.test, x: cr.missing === 'include' ? 1 : 0, q: cr.anyQual ? 1 : 0 };
-  const h = (st.seed ? 'niin=' + st.seed : 'pools=' + st.pools.join(',')) + (st.seed && st.pools.length > 1 ? '&pools=' + st.pools.join(',') : '') + (Object.keys(c).length ? '&c=' + encodeURIComponent(JSON.stringify(c)) : '');
+  for (const [k, cr] of Object.entries(st.crit)) c[k] = { m: cr.mode, v: [...(cr.values || [])], f: [...(cr.fams || [])], lo: cr.lo, hi: cr.hi, t: cr.test, x: cr.missing === 'include' ? 1 : 0, q: cr.anyQual ? 1 : 0 };
+  // Families are saved by name (members are looked up again on load), loose
+  // item names by pool id, unticked family members in x.
+  const loose = st.loose.filter(p => !(st.item && p === st.item.pool));
+  const parts = [];
+  if (st.seed) parts.push('niin=' + st.seed);
+  if (loose.length) parts.push('pools=' + loose.join(','));
+  if (st.fams.length) parts.push('fams=' + encodeURIComponent(JSON.stringify(st.fams.map(f => [f.name, f.na ? 1 : 0]))));
+  if (st.excl.size) parts.push('x=' + [...st.excl].join(','));
+  if (Object.keys(c).length) parts.push('c=' + encodeURIComponent(JSON.stringify(c)));
+  const h = parts.join('&');
   history.replaceState(null, '', '#' + h);
 }
 function critFromHash(c) {
   const out = {};
-  for (const [k, v] of Object.entries(c || {})) out[k] = { mode: v.m, values: new Set(v.v || []), lo: v.lo, hi: v.hi, test: v.t || 'within', missing: v.x ? 'include' : 'exclude', anyQual: !!v.q };
+  for (const [k, v] of Object.entries(c || {})) out[k] = { mode: v.m, values: new Set(v.v || []), fams: new Set(v.f || []), _open: new Set(v.f || []), lo: v.lo, hi: v.hi, test: v.t || 'within', missing: v.x ? 'include' : 'exclude', anyQual: !!v.q };
   return out;
 }
 async function search() {
@@ -501,7 +790,7 @@ async function exportCsv() {
     const lines = [head.join(',')];
     for (const x of r.rows) lines.push([x.nsn, x.niin, x.item_name, x.score, x.matched, x.compared, x.unknown, x.aac, x.unit_price, x.ui, x.active_cages, (x.relations || []).join(' '),
       (x.diffs || []).map(d => d.statement + ': ' + d.value).join(' | '), (x.parts || []).map(p => p.part_number + ' (' + p.cage_code + ')').join(' | ')].map(q).join(','));
-    const crit = Object.entries(st.crit).map(([k, cr]) => '# ' + k + ' ' + cr.mode + (cr.lo != null ? ' ' + cr.lo + '..' + cr.hi : '') + (cr.values && cr.values.size ? ' [' + [...cr.values].join(' / ') + ']' : ''));
+    const crit = Object.entries(st.crit).map(([k, cr]) => '# ' + k + ' ' + cr.mode + (cr.lo != null ? ' ' + cr.lo + '..' + cr.hi : '') + ((cr.values && cr.values.size) || (cr.fams && cr.fams.size) ? ' [' + [...(cr.values || [])].concat([...(cr.fams || [])].map(x => x + ' *')).join(' / ') + ']' : ''));
     const blob = new Blob(['# Alternate Part Finder export ' + new Date().toISOString() + (st.seed ? ' start ' + st.seed : '') + '\n' + crit.join('\n') + (crit.length ? '\n' : '') + lines.join('\n')], { type: 'text/csv' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'alternates_' + (st.seed || 'pool') + '.csv'; a.click();
     setStatus('Exported ' + r.rows.length + ' rows' + (r.total > r.rows.length ? ' (first 2000 of ' + r.total + ')' : ''));
@@ -533,10 +822,11 @@ async function loadQuality() {
   try {
     const q = await api('/api/quality?pool=' + st.pools.join(','));
     let h = q.notes.map(n => '<div class="note">' + esc(n) + '</div>').join('');
-    h += '<h3 style="font-size:13px;margin:10px 0 4px">Characteristics in this group that need a second look <span class="muted">' + q.findings.length + '</span></h3>';
+    h += '<h3 style="font-size:13px;margin:10px 0 4px">Characteristics in this group that need a second look <span class="muted">' + (q.findingsTotal > q.findings.length ? 'largest ' + q.findings.length + ' of ' + q.findingsTotal : q.findings.length) + '</span></h3>';
+    const many = st.pools.length > 1;
     if (!q.findings.length) h += '<div class="muted">No mixed units, mixed reply types or 10x outliers in this group.</div>';
     for (const f of q.findings) {
-      h += '<div class="crit"><div class="head"><span class="name">' + esc(f.statement) + (f.qual ? ' <span class="muted">(' + esc(f.qual.toLowerCase()) + ')</span>' : '') + '</span><span class="badge">' + f.niins + ' items</span></div><ul class="small" style="margin:4px 0 0 18px;padding:0">' + f.issues.map(i => '<li>' + esc(i) + '</li>').join('') + '</ul>';
+      h += '<div class="crit"><div class="head"><span class="name">' + esc(f.statement) + (f.qual ? ' <span class="muted">(' + esc(f.qual.toLowerCase()) + ')</span>' : '') + (many ? ' <span class="muted">in ' + esc((st.poolInfo[f.pool] || {}).name || f.pool) + '</span>' : '') + '</span><span class="badge">' + f.niins + ' items</span></div><ul class="small" style="margin:4px 0 0 18px;padding:0">' + f.issues.map(i => '<li>' + esc(i) + '</li>').join('') + '</ul>';
       if (f.outlierItems && f.outlierItems.length) h += '<div class="small">Check: ' + f.outlierItems.map(o => '<button class="link" data-detail="' + o.niin + '">' + o.niin + '</button> ' + esc(o.value)).join(' &middot; ') + '</div>';
       h += '</div>';
     }
@@ -611,6 +901,8 @@ $('#tab-help').innerHTML = `
 <div class="small" style="max-width:780px">
 <p><b>What it compares.</b> Every item in PUB LOG's V_CHARACTERISTICS has one reply per requirement (MRC), for example <i>OVERALL LENGTH: INCHES MINIMUM 0.657 AND INCHES MAXIMUM 0.781</i>. Replies are parsed into numbers with units (converted to one unit per dimension, so millimetres and inches compare) or into text values (one per "OR" alternative). Unit wording the parser does not recognise is never guessed: those replies are compared only by exact wording and listed under Data quality.</p>
 <p><b>Which items are candidates.</b> Items with the same item name code (INC) as the starting item. Add other item names under "Searching within" to widen the search (for example a bolt and a screw that share dimensions). INC 77777 (non-approved item names) is split by the actual item name.</p>
+<p><b>Families of item names.</b> FLIS item names read noun first, then modifiers: NUT,SELF-LOCKING,HEXAGON. Searching an item name shows them nested on the commas; "Search all" takes every name under a node (NUT = 86 item names). With a starting item, "Widen to" offers its wider families (NUT,SELF-LOCKING, then NUT). A family can be opened to untick single names, and can include the non-approved (INC 77777) names under it. PUB LOG cuts item names at 32 characters, so two INCs can show the same name; the INC is shown beside them.</p>
+<p><b>Families of values.</b> Text values nest the same way on their leading words: STEEL covers STEEL, STEEL COMP 302, STEEL CORROSION RESISTING ... Tick STEEL to accept any kind of steel, including kinds not listed, or open it and tick only the kinds you accept. With a starting item, "around start" switches between its exact value and its wider families (any STEEL COMP, any STEEL). Families follow the wording, not metallurgy: STEEL COMP 304 is a corrosion-resisting steel but is not in the STEEL CORROSION RESISTING family.</p>
 <p><b>Criteria.</b> <i>Lock</i> requires the same value; <i>Range</i> keeps items whose value lies within (or overlaps, or covers) your bounds; <i>Any of / All of / None of</i> work on text values. Items with no reply for a criterion are dropped unless you tick "also keep items with no value here". The value lists and histograms show what the items that pass your <i>other</i> criteria have, so you can see what loosening one criterion would add.</p>
 <p><b>Ranking.</b> With a starting item, matches are ranked by similarity across all of its characteristics (text: overlap of values; numbers: closeness of the values), with characteristics the candidate lacks counted separately as n/a.</p>
 <p><b>Is it really an alternate?</b> Characteristics in FLIS are what was catalogued, not a full engineering definition. Treat matches as candidates for engineering review. The FLIS relationships tab shows links FLIS itself records (standardization decisions, cancelled/replacement NIINs, phrases and shared reference numbers). The Buy column is the acquisition advice code (red = not procurable, e.g. V terminal, T condemned).</p>
@@ -623,9 +915,12 @@ $('#tab-help').innerHTML = `
     const hp = new URLSearchParams(location.hash.slice(1));
     let crit = null; try { crit = hp.get('c') ? critFromHash(JSON.parse(hp.get('c'))) : null; } catch (e) { setStatus('Ignoring unreadable criteria in the link.', true); }
     const pools = (hp.get('pools') || '').split(',').filter(Boolean).map(Number);
+    const excl = (hp.get('x') || '').split(',').filter(Boolean).map(Number);
+    let fams = []; try { fams = hp.get('fams') ? JSON.parse(hp.get('fams')) : []; } catch (e) { setStatus('Ignoring unreadable item-name families in the link.', true); }
     const showAll = crit && Object.keys(crit).length > 0;
-    if (hp.get('niin')) { $('#q').value = hp.get('niin'); setSeed(hp.get('niin').replace(/\D/g, '').slice(-9), { crit, pools, showAll }); }
-    else if (pools.length) setPoolOnly(pools[0], { crit, pools });
+    if (hp.get('niin')) { $('#q').value = hp.get('niin'); setSeed(hp.get('niin').replace(/\D/g, '').slice(-9), { crit, pools, showAll, fams, excl }); }
+    else if (pools.length || fams.length) setPoolOnly(null, { crit, pools, fams, excl });
+    else if (hp.get('q')) { $('#q').value = hp.get('q'); find(); }
   } catch (e) { setStatus('Server not reachable: ' + e.message, true); }
 })();
 </script>
