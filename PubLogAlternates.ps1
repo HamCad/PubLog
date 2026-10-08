@@ -831,7 +831,13 @@ namespace AltParts
         public string AltPath, PubLogPath;
         readonly JavaScriptSerializer js = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 200 };
         readonly LinkedList<PoolData> cache = new LinkedList<PoolData>();
-        public int CacheSize = 4;
+        // Pools stay in memory until their atoms exceed this budget (about 25
+        // bytes each), so a search over a whole item-name family (NUT: 86 item
+        // names) is not reloaded from disk on every click.
+        public long CacheAtoms = 8000000;
+        public int CacheSize = 5000;
+        readonly Dictionary<long, LinkedListNode<PoolData>> cacheIx = new Dictionary<long, LinkedListNode<PoolData>>();
+        long cachedAtoms;
         readonly Dictionary<string, string> helpCache = new Dictionary<string, string>();
         readonly Dictionary<string, string> stmtCache = new Dictionary<string, string>();
         static readonly CultureInfo IC = CultureInfo.InvariantCulture;
@@ -878,8 +884,8 @@ namespace AltParts
 
         public PoolData LoadPool(long pool)
         {
-            for (var n = cache.First; n != null; n = n.Next)
-                if (n.Value.Pool == pool) { cache.Remove(n); cache.AddFirst(n); return n.Value; }
+            LinkedListNode<PoolData> hit;
+            if (cacheIx.TryGetValue(pool, out hit)) { cache.Remove(hit); cache.AddFirst(hit); return hit.Value; }
             var p = new PoolData { Pool = pool };
             var niins = new List<long>(); var start = new List<int>(); var end = new List<int>();
             var key = new List<int>(); var kind = new List<byte>(); var txt = new List<int>(); var lo = new List<double>(); var hi = new List<double>();
@@ -919,8 +925,11 @@ namespace AltParts
                 }
             p.Descriptive = new bool[nk];
             for (int k = 0; k < nk; k++) p.Descriptive[k] = keyTxt[k] != null && keyNiins[k] >= 20 && keyTxt[k].Count > 0.5 * keyNiins[k];
-            cache.AddFirst(p);
-            while (cache.Count > CacheSize) cache.RemoveLast();
+            cacheIx[pool] = cache.AddFirst(p); cachedAtoms += p.Atoms;
+            while (cache.Count > 1 && (cache.Count > CacheSize || cachedAtoms > CacheAtoms))
+            {
+                var old = cache.Last; cache.RemoveLast(); cacheIx.Remove(old.Value.Pool); cachedAtoms -= old.Value.Atoms;
+            }
             return p;
         }
 
@@ -941,6 +950,8 @@ namespace AltParts
                 case "/api/item": result = Item(ParseNiin(Get(q, "niin"))); break;
                 case "/api/pool": result = PoolProfile(ParsePools(Get(q, "pool")), Get(q, "seed")); break;
                 case "/api/pools": result = FindPools(Get(q, "q")); break;
+                case "/api/family": result = NameFamily(Get(q, "name"), Get(q, "nonApproved") == "1"); break;
+                case "/api/ancestors": result = NameAncestors(Get(q, "name")); break;
                 case "/api/search":
                     if (method != "POST") throw new ArgumentException("POST a JSON body to /api/search.");
                     result = Search((Dictionary<string, object>)js.DeserializeObject(body)); break;
@@ -1042,14 +1053,101 @@ namespace AltParts
             return list;
         }
 
+        // ---- item names ------------------------------------------------------------
+        // FLIS item names read noun first, then modifiers, separated by commas:
+        // NUT,SELF-LOCKING,HEXAGON. A few are written with ", ".
+        public static string[] NameSegments(string name)
+        {
+            return (name ?? "").Split(',').Select(x => x.Trim()).Where(x => x.Length > 0).ToArray();
+        }
+        public static string NormName(string name) { return string.Join(",", NameSegments((name ?? "").ToUpperInvariant())); }
+        public static bool InNameFamily(string name, string fam)
+        {
+            string n = NormName(name), f = NormName(fam);
+            return f.Length > 0 && (n == f || n.StartsWith(f + ",", StringComparison.Ordinal));
+        }
+
+        sealed class NameRow { public long Pool, Inc, Niins; public string Name, Norm, Root, Fscs; public bool Odd; }
+        List<NameRow> names;
+        // All item names (~330 K, most of them one-item INC 77777 pools), kept in
+        // memory so the name tree and family lookups need no table scans.
+        List<NameRow> Names()
+        {
+            if (names != null) return names;
+            var list = new List<NameRow>();
+            using (var st = Db.Prepare("SELECT pool, inc, name, niins, fscs FROM ac_pool"))
+                while (st.Step())
+                {
+                    var r = new NameRow { Pool = st.Long(0), Inc = st.Long(1), Name = st.Text(2) ?? "", Niins = st.Long(3), Fscs = st.Text(4) };
+                    r.Norm = NormName(r.Name); int c = r.Norm.IndexOf(','); r.Root = c < 0 ? r.Norm : r.Norm.Substring(0, c); r.Odd = r.Inc == Builder.NonApprovedInc; list.Add(r);
+                }
+            names = list;
+            return names;
+        }
+        static Dictionary<string, object> NameDict(NameRow r)
+        {
+            return new Dictionary<string, object> { { "pool", r.Pool }, { "inc", r.Inc }, { "name", r.Name }, { "niins", r.Niins }, { "fscs", r.Fscs } };
+        }
+        static string RootOf(string normName) { int c = normName.IndexOf(','); return c < 0 ? normName : normName.Substring(0, c); }
+        static bool InFam(NameRow r, string normFam) { return r.Root == RootOf(normFam) && (r.Norm == normFam || r.Norm.StartsWith(normFam + ",", StringComparison.Ordinal)); }
+
+        // Item names matching the text, plus every approved name sharing their
+        // leading noun, so the page can nest them (NUT > PLAIN > HEXAGON) with
+        // whole-family counts. INC 77777 names are mostly one-item pools: only
+        // the largest matches are listed, and the rest are counted per noun.
         object FindPools(string q)
         {
-            string like = "%" + (q ?? "").Trim().ToUpperInvariant() + "%";
-            var rows = Db.Rows(@"SELECT p.pool, p.inc, p.name, p.niins, p.fscs FROM ac_pool p WHERE upper(p.name) LIKE ? ORDER BY p.niins DESC LIMIT 40", like);
+            string u = (q ?? "").Trim().ToUpperInvariant();
+            var all = Names();
+            var hits = all.Where(r => r.Name.IndexOf(u, StringComparison.Ordinal) >= 0).ToList();
+            var roots = hits.Where(r => !r.Odd).GroupBy(r => r.Root).OrderByDescending(g => g.Sum(r => r.Niins)).Select(g => g.Key).Take(60).ToList();
+            var rootSet = new HashSet<string>(roots);
+            var hitSet = new HashSet<long>(hits.Select(r => r.Pool));
+            var rows = new List<object>();
+            foreach (var r in all.Where(r => !r.Odd && rootSet.Contains(r.Root)).OrderByDescending(r => r.Niins).Take(1500))
+            { var d = NameDict(r); d["match"] = hitSet.Contains(r.Pool); rows.Add(d); }
+            foreach (var r in hits.Where(r => r.Odd).OrderByDescending(r => r.Niins).Take(25))
+            { var d = NameDict(r); d["match"] = true; rows.Add(d); }
+            var oddByRoot = all.Where(r => r.Odd && rootSet.Contains(r.Root)).GroupBy(r => r.Root)
+                .Select(g => (object)new Dictionary<string, object> { { "root", g.Key }, { "pools", g.Count() }, { "niins", g.Sum(r => r.Niins) } }).ToList();
             // Colloquial names (H6) point at an INC.
             var coll = Db.Rows(@"SELECT DISTINCT c.colloquial_name, p.pool, p.name, p.niins FROM pl.pl_v_colloquial_name c JOIN ac_pool p ON p.inc = CAST(c.inc AS INTEGER)
-                                 WHERE c.colloquial_name LIKE ? ORDER BY p.niins DESC LIMIT 20", like);
-            return new Dictionary<string, object> { { "pools", rows }, { "colloquial", coll } };
+                                 WHERE c.colloquial_name LIKE ? ORDER BY p.niins DESC LIMIT 20", "%" + u + "%");
+            return new Dictionary<string, object> { { "pools", rows }, { "colloquial", coll }, { "nonApprovedByRoot", oddByRoot } };
+        }
+
+        const int MaxFamilyPools = 2000;
+        // Every item name in a family (NUT,PLAIN -> NUT,PLAIN,HEXAGON, NUT,PLAIN,ROUND, ...).
+        // INC 77777 names only when asked for, largest first, at most MaxFamilyPools.
+        object NameFamily(string fam, bool nonApproved)
+        {
+            string f = NormName(fam);
+            if (f.Length == 0) throw new ArgumentException("name is required.");
+            var appr = Names().Where(r => !r.Odd && InFam(r, f)).OrderBy(r => r.Norm).ToList();
+            var odd = Names().Where(r => r.Odd && InFam(r, f)).OrderByDescending(r => r.Niins).ToList();
+            var list = appr.Select(NameDict).ToList();
+            if (nonApproved) list.AddRange(odd.Take(MaxFamilyPools).Select(NameDict));
+            return new Dictionary<string, object> { { "name", f },
+                { "approved", new Dictionary<string, object> { { "pools", appr.Count }, { "niins", appr.Sum(r => r.Niins) } } },
+                { "nonApproved", new Dictionary<string, object> { { "pools", odd.Count }, { "niins", odd.Sum(r => r.Niins) } } },
+                { "truncated", nonApproved && odd.Count > MaxFamilyPools }, { "pools", list } };
+        }
+
+        // The wider families an item name belongs to, narrowest first, with sizes:
+        // NUT,SELF-LOCKING,HEXAGON -> NUT,SELF-LOCKING (24 names) -> NUT (86 names).
+        object NameAncestors(string name)
+        {
+            var seg = NameSegments((name ?? "").ToUpperInvariant());
+            var list = new List<object>();
+            for (int n = seg.Length - 1; n >= 1; n--)
+            {
+                string fam = string.Join(",", seg.Take(n));
+                var appr = Names().Where(r => !r.Odd && InFam(r, fam)).ToList();
+                var odd = Names().Where(r => r.Odd && InFam(r, fam)).ToList();
+                list.Add(new Dictionary<string, object> { { "name", fam }, { "pools", appr.Count }, { "niins", appr.Sum(r => r.Niins) },
+                    { "nonApprovedPools", odd.Count }, { "nonApprovedNiins", odd.Sum(r => r.Niins) } });
+            }
+            return new Dictionary<string, object> { { "name", NormName(name) }, { "ancestors", list } };
         }
 
         // ---- item detail -------------------------------------------------------
@@ -1219,6 +1317,8 @@ namespace AltParts
         {
             public string Mrc, Qual, Mode, Test, Missing; public bool AnyQual;
             public HashSet<string> Values = new HashSet<string>();
+            // Value families: "STEEL" stands for STEEL, STEEL COMP 302, STEEL CORROSION RESISTING, ...
+            public HashSet<string> Families = new HashSet<string>();
             public double Lo = double.NaN, Hi = double.NaN;
         }
 
@@ -1233,7 +1333,9 @@ namespace AltParts
         // or function: shown and lockable, but never part of the similarity score.
         public static readonly HashSet<string> NonPhysical = new HashSet<string> { "AGAV", "AYDS", "AYDR", "AJJW", "AJJX", "AJJY", "AJJZ", "AJKE", "CXCY", "CRTL", "FEAT", "TEXT" };
 
-        sealed class Prepared { public bool[] KeyMatch; public HashSet<int> Ids = new HashSet<int>(); public int Absent; }
+        // Ids: every string id the constraint accepts (values and family members);
+        // ValIds: the explicitly named values; Fams: one id set per family.
+        sealed class Prepared { public bool[] KeyMatch; public HashSet<int> Ids = new HashSet<int>(), ValIds = new HashSet<int>(); public List<HashSet<int>> Fams = new List<HashSet<int>>(); public int Absent; }
         sealed class SeedKey { public string Mrc, Qual; public bool Text; public List<string> Txt = new List<string>(); public List<double> Mid = new List<double>(); }
         sealed class Cand { public PoolData P; public int Ix; public double Score; public int Matched, Compared, Unknown; }
 
@@ -1241,8 +1343,36 @@ namespace AltParts
         {
             var pr = new Prepared { KeyMatch = new bool[p.KeyMrc.Count] };
             for (int k = 0; k < pr.KeyMatch.Length; k++) pr.KeyMatch[k] = p.KeyMrc[k] == c.Mrc && (c.AnyQual || p.KeyQual[k] == c.Qual);
-            foreach (string v in c.Values) { int i; if (p.StringIx.TryGetValue(v, out i)) pr.Ids.Add(i); else pr.Absent++; }
+            foreach (string v in c.Values) { int i; if (p.StringIx.TryGetValue(v, out i)) pr.ValIds.Add(i); else pr.Absent++; }
+            pr.Ids.UnionWith(pr.ValIds);
+            foreach (string fam in c.Families)
+            {
+                var set = new HashSet<int>();
+                for (int i = 0; i < p.Strings.Count; i++) if (InFamily(p.Strings[i], fam)) set.Add(i);
+                pr.Fams.Add(set); pr.Ids.UnionWith(set);
+            }
             return pr;
+        }
+
+        // A value belongs to a family when it is the family's wording or starts
+        // with it followed by a word break: STEEL COMP 302 is in STEEL and in
+        // STEEL COMP, but STEELITE is not in STEEL.
+        public static bool InFamily(string s, string fam)
+        {
+            if (s == null || string.IsNullOrEmpty(fam) || !s.StartsWith(fam, StringComparison.Ordinal)) return false;
+            return s.Length == fam.Length || s[fam.Length] == ' ' || s[fam.Length] == ',';
+        }
+
+        // The families a value can be grouped under: each leading run of words
+        // (at most four) and the value itself. "STEEL COMP 302" -> STEEL, STEEL COMP, STEEL COMP 302.
+        public static List<string> FamiliesOf(string s)
+        {
+            var list = new List<string>();
+            if (string.IsNullOrEmpty(s)) return list;
+            for (int i = 1; i < s.Length && list.Count < 4; i++)
+                if ((s[i] == ' ' || s[i] == ',') && s[i - 1] != ' ' && s[i - 1] != ',') list.Add(s.Substring(0, i));
+            list.Add(s);
+            return list;
         }
 
         static bool Passes(PoolData p, int ix, Constraint c, Prepared pr, List<int> ids)
@@ -1270,8 +1400,8 @@ namespace AltParts
                 case "range": return ok;
                 case "any": foreach (int i in ids) if (pr.Ids.Contains(i)) return true; return false;
                 case "none": foreach (int i in ids) if (pr.Ids.Contains(i)) return false; return true;
-                case "all": { if (pr.Absent > 0) return false; var h = new HashSet<int>(ids); return pr.Ids.All(h.Contains); }
-                case "exact": { if (pr.Absent > 0) return false; var h = new HashSet<int>(ids); return h.SetEquals(pr.Ids); }
+                case "all": { if (pr.Absent > 0) return false; var h = new HashSet<int>(ids); return pr.ValIds.All(h.Contains) && pr.Fams.All(f => f.Overlaps(h)); }
+                case "exact": { if (pr.Absent > 0) return false; var h = new HashSet<int>(ids); return pr.ValIds.All(h.Contains) && pr.Fams.All(f => f.Overlaps(h)) && h.All(pr.Ids.Contains); }
                 default: throw new ArgumentException("Unknown criterion mode '" + c.Mode + "'.");
             }
         }
@@ -1315,6 +1445,7 @@ namespace AltParts
                         Missing = (S(d, "missing") ?? "exclude").ToLowerInvariant(), AnyQual = Convert.ToBoolean(d.ContainsKey("anyQual") ? d["anyQual"] : false) };
                     if (c.Mode == "ignore") continue;
                     if (d.ContainsKey("values") && d["values"] != null) foreach (object v in (object[])d["values"]) c.Values.Add(ReplyParser.NormText(Convert.ToString(v, IC)));
+                    if (d.ContainsKey("families") && d["families"] != null) foreach (object v in (object[])d["families"]) { string f = ReplyParser.NormText(Convert.ToString(v, IC)); if (f.Length > 0) c.Families.Add(f); }
                     double lo = D(d, "lo"), hi = D(d, "hi");
                     Unit u = S(d, "unit") == null ? null : Units.Find(S(d, "unit"));
                     c.Lo = u == null || double.IsNaN(lo) ? lo : u.ToCanon(lo);
@@ -1344,10 +1475,18 @@ namespace AltParts
             int K = seedKeys.Count;
 
             // Facets requested by the page.
-            var fm = new List<string>(); var fq = new List<string>();
+            var fm = new List<string>(); var fq = new List<string>(); var fLimit = new List<int>();
             if (req.ContainsKey("facets") && req["facets"] != null)
-                foreach (object o in (object[])req["facets"]) { var d = (Dictionary<string, object>)o; fm.Add(S(d, "mrc")); fq.Add(S(d, "qual") ?? ""); if (fm.Count >= 80) break; }
+                foreach (object o in (object[])req["facets"])
+                {
+                    var d = (Dictionary<string, object>)o; fm.Add(S(d, "mrc")); fq.Add(S(d, "qual") ?? "");
+                    double lim = D(d, "limit"); fLimit.Add(double.IsNaN(lim) ? 60 : Math.Max(1, Math.Min(1000, (int)lim)));
+                    if (fm.Count >= 80) break;
+                }
             int F = fm.Count;
+            // Family counts per facet: NIINs with any value in the family, each NIIN once.
+            var fFam = new Dictionary<string, int>[F]; var fFamStamp = new Dictionary<string, int>[F];
+            for (int f = 0; f < F; f++) { fFam[f] = new Dictionary<string, int>(); fFamStamp[f] = new Dictionary<string, int>(); }
             var fCons = new int[F]; var fBase = new int[F]; var fHave = new int[F]; var fUnit = new string[F];
             var fTxt = new Dictionary<string, int>[F]; var fVals = new List<double>[F];
             for (int f = 0; f < F; f++) { fCons[f] = cons.FindIndex(c => c.Mrc == fm[f] && (c.AnyQual || c.Qual == fq[f])); fTxt[f] = new Dictionary<string, int>(); fVals[f] = new List<double>(); }
@@ -1368,6 +1507,7 @@ namespace AltParts
                 var cTxt = new HashSet<int>[K]; var cMid = new List<double>[K];
                 for (int si = 0; si < K; si++) { cTxt[si] = new HashSet<int>(); cMid[si] = new List<double>(); }
                 var lastFacetIx = Enumerable.Repeat(-1, F).ToArray();
+                var famsOfStr = new Dictionary<int, List<string>>();
 
                 for (int ix = 0; ix < p.Niins.Length; ix++)
                 {
@@ -1391,7 +1531,18 @@ namespace AltParts
                             {
                                 if (!(fail == 0 || fCons[f] == onlyIdx)) continue;
                                 if (lastFacetIx[f] != ix) { lastFacetIx[f] = ix; fHave[f]++; }
-                                if (p.Kind[a] == 0) { string t = p.Txt[a] >= 0 ? p.Strings[p.Txt[a]] : ""; int cnt; fTxt[f].TryGetValue(t, out cnt); fTxt[f][t] = cnt + 1; }
+                                if (p.Kind[a] == 0)
+                                {
+                                    string t = p.Txt[a] >= 0 ? p.Strings[p.Txt[a]] : ""; int cnt; fTxt[f].TryGetValue(t, out cnt); fTxt[f][t] = cnt + 1;
+                                    if (p.Txt[a] < 0 || p.Descriptive[p.Key[a]]) continue;
+                                    List<string> fams;
+                                    if (!famsOfStr.TryGetValue(p.Txt[a], out fams)) { fams = FamiliesOf(t); famsOfStr[p.Txt[a]] = fams; }
+                                    foreach (string fam in fams)
+                                    {
+                                        int stamp; if (fFamStamp[f].TryGetValue(fam, out stamp) && stamp == poolNiins) continue;
+                                        fFamStamp[f][fam] = poolNiins; fFam[f].TryGetValue(fam, out cnt); fFam[f][fam] = cnt + 1;
+                                    }
+                                }
                                 else { fVals[f].Add((p.Lo[a] + p.Hi[a]) / 2); if (fUnit[f] == null && p.Txt[a] >= 0) fUnit[f] = p.Strings[p.Txt[a]]; }
                             }
                         }
@@ -1448,7 +1599,8 @@ namespace AltParts
             for (int f = 0; f < F; f++)
             {
                 var fo = new Dictionary<string, object> { { "mrc", fm[f] }, { "qual", fq[f] }, { "base", fBase[f] }, { "have", fHave[f] }, { "missing", fBase[f] - fHave[f] }, { "distinct", fTxt[f].Count } };
-                fo["values"] = fTxt[f].OrderByDescending(x => x.Value).ThenBy(x => x.Key).Take(60).Select(x => (object)new Dictionary<string, object> { { "txt", x.Key }, { "n", x.Value } }).ToList();
+                fo["values"] = fTxt[f].OrderByDescending(x => x.Value).ThenBy(x => x.Key).Take(fLimit[f]).Select(x => (object)new Dictionary<string, object> { { "txt", x.Key }, { "n", x.Value } }).ToList();
+                fo["families"] = FacetFamilies(fTxt[f].Keys, fFam[f]);
                 if (fVals[f].Count > 0) fo["hist"] = Histogram(fVals[f], fUnit[f]);
                 facets.Add(fo);
             }
@@ -1457,6 +1609,26 @@ namespace AltParts
             return new Dictionary<string, object> {
                 { "total", rows.Count }, { "poolNiins", poolNiins }, { "scoredOn", K }, { "rows", outRows }, { "facets", facets },
                 { "constraintCounts", counts }, { "ms", sw.ElapsedMilliseconds } };
+        }
+
+        // Families worth offering for one facet: a leading run of words shared by
+        // two or more distinct values. A family with exactly the same values as a
+        // longer one (COPPER when every COPPER value is COPPER ALLOY ...) is
+        // dropped in favour of the longer, more telling wording.
+        static List<object> FacetFamilies(IEnumerable<string> values, Dictionary<string, int> niinCounts)
+        {
+            var members = new Dictionary<string, int>();
+            foreach (string v in values) foreach (string fam in FamiliesOf(v)) { int m; members.TryGetValue(fam, out m); members[fam] = m + 1; }
+            var keep = members.Where(kv => kv.Value >= 2).Select(kv => kv.Key).ToList();
+            var list = new List<object>();
+            foreach (string fam in keep)
+            {
+                bool same = keep.Any(o => o.Length > fam.Length && InFamily(o, fam) && members[o] == members[fam]);
+                if (same) continue;
+                int n; niinCounts.TryGetValue(fam, out n);
+                list.Add(new Dictionary<string, object> { { "txt", fam }, { "n", n }, { "members", members[fam] } });
+            }
+            return list.OrderByDescending(x => (int)((Dictionary<string, object>)x)["n"]).Take(200).ToList();
         }
 
         // The seed characteristics a candidate does not match exactly (for the page only).
@@ -1584,9 +1756,9 @@ namespace AltParts
         {
             var res = new Dictionary<string, object>();
             var findings = new List<object>();
+            var outlierArgs = new Dictionary<object, object[]>();
             foreach (long pool in pools)
             {
-                PoolData p = LoadPool(pool);
                 foreach (var r in Db.Rows("SELECT * FROM ac_pool_char WHERE pool = ? ORDER BY niins DESC", pool))
                 {
                     string mrc = (string)r["mrc"], qual = (string)r["qual"];
@@ -1600,11 +1772,20 @@ namespace AltParts
                     if (outl > 0) issues.Add(string.Format(IC, "{0:N0} value(s) far outside the group (10x or more from the median, beyond the group's normal spread): possible unit or decimal error, e.g. {1}", outl, r["outlier_example"]));
                     if (issues.Count == 0) continue;
                     var f = new Dictionary<string, object> { { "pool", pool }, { "mrc", mrc }, { "qual", qual }, { "statement", Statement(mrc) }, { "niins", r["niins"] }, { "issues", issues } };
-                    if (outl > 0) f["outlierItems"] = Outliers(p, mrc, qual, r["v_med"] == null ? double.NaN : Convert.ToDouble(r["v_med"]), r["outlier_cut"] == null ? 1.0 : Convert.ToDouble(r["outlier_cut"]), 25);
+                    if (outl > 0) outlierArgs[f] = new object[] { pool, mrc, qual, r["v_med"] == null ? double.NaN : Convert.ToDouble(r["v_med"]), r["outlier_cut"] == null ? 1.0 : Convert.ToDouble(r["outlier_cut"]) };
                     findings.Add(f);
                 }
             }
-            res["findings"] = findings;
+            // A whole item-name family can have hundreds of findings: largest first.
+            res["findingsTotal"] = findings.Count;
+            var shown = findings.OrderByDescending(x => Convert.ToInt64(((Dictionary<string, object>)x)["niins"])).Take(200).ToList();
+            // Outlier NIINs need the pool in memory: only for the findings shown.
+            foreach (var f in shown)
+            {
+                object[] oa; if (!outlierArgs.TryGetValue(f, out oa)) continue;
+                ((Dictionary<string, object>)f)["outlierItems"] = Outliers(LoadPool((long)oa[0]), (string)oa[1], (string)oa[2], (double)oa[3], (double)oa[4], 25);
+            }
+            res["findings"] = shown;
             var mrcs = new HashSet<string>();
             foreach (long pool in pools) foreach (var r in Db.Rows("SELECT DISTINCT mrc FROM ac_pool_char WHERE pool = ?", pool)) mrcs.Add((string)r["mrc"]);
             res["parseGaps"] = Db.Rows("SELECT mrc, statement, replies, text_replies, unparsed_numeric, example_unparsed FROM ac_mrc WHERE unparsed_numeric > 0 ORDER BY unparsed_numeric DESC").Where(r => mrcs.Contains((string)r["mrc"])).Take(40).ToList();
